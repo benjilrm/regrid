@@ -1,0 +1,1387 @@
+
+[To-dos (contains research
+questions)](https://docs.google.com/document/d/1vTpxr06BUZmbJGiVwWKPF25CAjFsIY7gwTVsOitZcGI/edit)
+
+[Meetings con
+Paolo](https://docs.google.com/document/d/1MMMNPR3i4zqfXu89s6NPBws8MVdwPz0GxWhJaZTk59o/edit)
+
+# Load packages and set universal variables
+
+```{r}
+library(sf)
+library(tidyverse)
+library(terra)
+library(exactextractr)
+library(ineq)
+library(stringdist)
+library(openxlsx)
+library(tmap)
+library(tigris)
+```
+
+```{r}
+crs = 3310
+cropland_threshold = 0.1
+feet_to_metres = 0.3048
+ha_to_m2 = 10000
+
+central_valley_counties = str_to_lower(c("Butte", "Colusa", "Glenn", "Fresno", "Kern", "Kings", "Madera", "Merced", "Placer", "Sacramento", "San_Joaquin", "Shasta", "Stanislaus", "Sutter", "Tehama", "Tulare", "Yolo", "Yuba"))
+
+ca_counties = st_transform(counties(state = "CA", year = 2020, class = "sf"), crs)%>%
+  filter(NAME %in% str_to_title(central_valley_counties) | NAME == "San Joaquin")
+```
+
+# Cropland parcels
+
+## Data imports
+
+### Crop raster
+
+Crop raster from [2023 Cropland CROS (USDA)](https://croplandcros.scinet.usda.gov/). Import and reclassify to binary (cropland or not cropland)
+
+```{r, eval = F}
+cropland_extent_raster = rast("Crop data/crops croplandcros/crops_3311.TIF")
+levels(cropland_extent_raster)
+reclass_matrix = cbind(c(59,92,111,112,121,122,123,124,131,141,142,143,152,176,190,195), 0)
+
+cropland_extent_raster_binary = classify(cropland_extent_raster, reclass_matrix, others = 1)
+
+writeRaster(cropland_extent_raster_binary, "Crop data/crops croplandcros/cropland_binary.tif")
+```
+
+```{r}
+cropland_extent_raster_binary = rast("Crop data/crops croplandcros/cropland_binary.tif")
+```
+
+### Regrid land parcels
+
+Generate list of all Regrid Central Valley land parcel geopackages
+
+```{r}
+# List all GPKG files in the folder
+gpkg_files = list.files("Regrid parcel data/Raw/", pattern = "\\.gpkg$", full.names = TRUE)
+
+central_valley_gpkgs = Filter(function(file) any(sapply(central_valley_counties, function(county) grepl(county, file))), gpkg_files)
+```
+
+Keep only relevant columns. Descriptions of Regrid column names [here](https://docs.google.com/spreadsheets/d/14RcBKyiEGa7q-SR0rFnDHVcovb9uegPJ3sfb3WlNPc0/edit#gid=942435131)
+
+```{r}
+colnames(st_read("Regrid parcel data/Raw/ca_alpine.gpkg")%>%data.frame())
+
+columns <- c("parcelnumb", "parcelnumb_no_formatting", "alt_parcelnumb1", "alt_parcelnumb2", 
+             "alt_parcelnumb3", "usedesc", "parvaltype", "improvval", "landval", "parval", 
+             "agval", "saleprice", "saledate", "owntype", "owner", "ownfrst", "ownlast", 
+             "owner2", "owner3", "owner4", "mailadd", "mail_address2", "careof", 
+             "mail_addno", "mail_addpref", "mail_addstr", "mail_addsttyp", "mail_addstsuf", 
+             "mail_unit", "mail_city", "mail_state2", "mail_zip", "address", "address2", 
+             "saddno", "saddpref", "saddstr", "saddsttyp", "saddstsuf", "sunit", "scity", 
+             "original_address", "city", "county", "szip", "cdl_raw", "cdl_majority_category", 
+             "cdl_majority_percent", "cdl_date", "ll_gisacre")
+```
+
+## Processing cropland parcels
+
+Go through the parcels geopackage for each Central Valley county, and
+for each parcel, calculate the fraction of the parcel that is cropland
+(based on our binary cropland raster above). Label parcels as "cropland
+parcels" if at least 10% of the parcel area is designated as cropland.
+This is to avoid designating parcels as cropland parcels in cases where
+a tiny portion is cropland or a few grid cells are mistakenly classified
+as cropland in the Cropland CROS raster. Combine cropland parcels from
+all Central Valley counties into one large dataset of cropland parcels.
+
+```{r, eval = F}
+start_time = Sys.time()
+
+master_cropland_parcels = lapply(central_valley_gpkgs, function(file) {
+  county_name = str_to_title(gsub("_", " ", gsub("ca_|\\.gpkg", "", basename(file))))
+  cat(county_name, "County\n")
+
+  return(st_transform(st_read(file, quiet = TRUE), crs) %>%
+    dplyr::select(all_of(columns))%>%
+    mutate(fraction_cropland = exact_extract(cropland_extent_raster_binary, ., 'mean'), 
+         parcel_area_ha = ll_gisacre * 0.404686, 
+         cropland_parcel = ifelse(fraction_cropland > cropland_threshold, 1, 0))%>%
+    filter(cropland_parcel == 1)%>%
+    separate(address, into = c("address_no", "address_st"), sep = " ", extra = "merge", convert = T, remove = F)%>%
+    rename(parcel_id = parcelnumb))})
+
+master_cropland_parcels = do.call(rbind, master_cropland_parcels)
+
+end_time = Sys.time()
+end_time - start_time
+
+st_write(master_cropland_parcels, "Regrid parcel data/Processed/central_valley_cropland_parcels_june6.gpkg")
+```
+
+# Compiling well and section data
+
+## Importing and initial processing
+
+### Well data
+
+Import well data from the [USGWD](https://www.hydroshare.org/resource/8b02895f02c14dd1a749bcc5584a5c55/) dataset and from the [OSWCR](https://data.ca.gov/dataset/well-completion-reports) dataset (maintained by the CA Dept of Water Resources).
+
+Import well data and get rid of duplicates (based on CA well ID).
+
+```{r}
+wells = read.csv("GW well data/USGWD_California.csv")%>%
+  arrange(rowSums(is.na(.)))%>%
+  distinct(Well.ID..State., .keep_all = TRUE)%>%
+  rename(ca_well_id = 2)
+```
+
+Bring in OSWCR dataset for additional important covariates that are not in USGWD, such as well address details, accuracy of geolocation, etc.
+
+```{r}
+oswcr = read.csv("GW well data/wellcompletionreports.csv")%>%
+  dplyr::select(1, LLACCURACY, METHODOFDETERMINATIONLL, WELLLOCATION, CITY, PLANNEDUSEFORMERUSE, APN)%>%
+  rename(ca_well_id = 1, geo_accuracy = 2, method_of_determination = 3, well_address = 4, city = 5, use_oswcr = 6)
+```
+
+Combine the 2 well datasets and turn into spatial point data
+
+```{r}
+wells_sf = st_transform(st_as_sf(left_join(wells, oswcr, by = "ca_well_id")%>%
+                                   filter(!is.na(Longitude) & !is.na(Latitude)), 
+                                 coords = c("Longitude", "Latitude"), crs = 4326), crs)
+
+rm(oswcr, wells)
+```
+
+### GW basins
+
+Import GW basin spatial data (obtained from [CA DWR](https://water.ca.gov/programs/groundwater-management/bulletin-118))
+
+```{r}
+gw_basins = st_transform(st_read("Bulletin 118 Groundwater Basin Boundaries/Bulletin 118 Groundwater Basin Boundary GIS Data - v6_2/Shapefile/Shapefile/i08_B118_v6_2.shp"), crs)%>%
+  dplyr::select(1:4)%>%
+  rename(basin_number = 1, subbasin_number = 2, basin_name = 3, subbasin_name = 4)%>%
+  st_filter(., ca_counties, .pred = st_intersects)
+```
+
+### Sections
+
+Import sections (1x1 mile squares) from [California Data Portal](https://data.ca.gov/dataset/public-land-survey-system-plss-sections).
+This is because most of the wells are not precisely geolocated, but rather snapped to the centroid of the section that they fall within.
+
+```{r}
+sections = st_transform(st_read("C:/Users/benji/OneDrive/Desktop/Regrid project/PLSS Sections/Public_Land_Survey_System_(PLSS)%3A_Sections.shp"), crs)
+```
+
+## Combining datasets
+
+### Relevant sections
+
+Filter for sections that intersect at least 1 cropland parcel and intersect a GW basin.
+
+```{r}
+sections_with_cropland_parcels_and_gw_basins = sections%>%
+  st_filter(., master_cropland_parcels, .pred = st_intersects)%>%
+  st_filter(., gw_basins, .pred = st_intersects)%>%
+  dplyr::select(MTRS, geometry)
+
+rm(sections)
+```
+
+### Wells in relevant sections
+
+Filter for wells that are in sections that intersect with cropland parcels in GW basins. Also for wells with use denoted irrigation or unknown. Process well address to facilitate future matches between wells and parcels based on address.
+
+```{r}
+filtered_wells = st_join(wells_sf, sections_with_cropland_parcels_and_gw_basins)%>%
+  filter(grepl("Irrigation|Unknown", USGS.Water.Use.Category) & !is.na(MTRS))%>%
+  mutate_at(vars(well_address, city), ~ na_if(., ""))%>%
+  separate(well_address, into = c("address_no", "address_st"), sep = " ", extra = "merge", convert = T, remove = F)
+
+rm(wells_sf)
+
+st_write(filtered_wells, "GW well data/wells_filtered_june6.gpkg")
+```
+
+### Relevant sections with wells in them
+
+Before, we filtered for sections intersecting cropland parcels and groundwater basins. Now, we want to narrow down to sections intersecting cropland parcels specifically that have a well in them. This will be our final 'filtered sections' dataset.
+
+```{r}
+filtered_sections = sections_with_cropland_parcels_and_gw_basins%>%
+  filter(MTRS %in% filtered_wells$MTRS)
+
+rm(sections_with_cropland_parcels_and_gw_basins)
+rm(filtered_wells, gw_basins, master_cropland_parcels)
+
+st_write(filtered_sections, "PLSS Sections/filtered_sections_june6.gpkg")
+```
+
+### Well buffer
+
+Not all wells are snapped to the centroid of the section they fall in. Based on the 'geo_accuracy' column, we can pull out the wells with accuracy of coordinates 50ft or less and put a buffer around them for the later matching steps. For example, for a well with accuracy 2.5ft, we can only consider matching that well to parcels within a 2.5ft buffer around that well.
+
+```{r}
+distances_less_than_50_ft = c("0.1 Ft", "10 Ft", "2.5 Ft", "20 Ft", "5 Ft", "50 Ft")
+
+well_buffer = filtered_wells%>%
+  mutate(buffer_distance = as.numeric(gsub("\\s*\\w*$", "", ifelse(geo_accuracy %in% distances_less_than_50_ft, geo_accuracy, NA)))*feet_to_metres)%>%
+  filter(!is.na(buffer_distance))%>%
+  mutate(geom = st_buffer(geom, dist = buffer_distance))%>%
+  dplyr::select(ca_well_id, MTRS, geom)%>%
+  rename(MTRS_well = MTRS)
+```
+
+# Filtered parcels
+
+Our master cropland parcels dataset will be great for analysis just concerning land (ex: relationship between precipitation and farm size).
+However, for land-water analysis, some of the wells could be matched to non-cropland parcels. We'll ultimately want to exclude these wells/parcels, but we don't want to mistakenly match a well with a cropland parcel when its 'true' match was with a non-cropland parcel. Therefore, for future matching steps, we want to get a dataset of all parcels (cropland and non-cropland) that intersect any sections with wells in them (aka, our final 'filtered sections' dataset).
+
+## Iterate through counties and parcels
+
+Here, similar to the cropland parcel iteration above, we go through each county. We filter for parcels that intersect with our 'filtered_sections' dataset and designate parcels as cropland parcels or not. We do some processing on parcel addresses to help with our matches by address later on. Finally, we combine the filtered parcels from all Central Valley counties into one dataset!
+
+```{r, eval = F}
+start_time = Sys.time()
+
+# Read all files and combine them into a single data frame
+filtered_parcels = lapply(central_valley_gpkgs, function(file) {
+  county_name = str_to_title(gsub("_", " ", gsub("ca_|\\.gpkg", "", basename(file))))
+  cat(county_name, "County\n")
+
+  return(st_transform(st_read(file, quiet = TRUE), crs) %>%
+    dplyr::select(all_of(columns))%>%
+    st_filter(., filtered_sections, .pred = st_intersects)%>%
+    mutate(fraction_cropland = exact_extract(cropland_extent_raster_binary, ., 'mean'), 
+         parcel_area_ha = ll_gisacre * 0.404686, 
+         cropland_parcel = ifelse(fraction_cropland > cropland_threshold, 1, 0))%>%
+    separate(address, into = c("address_no", "address_st"), sep = " ", extra = "merge", convert = T, remove = F)%>%
+    rename(parcel_id = parcelnumb))})
+
+filtered_parcels = do.call(rbind, filtered_parcels)
+
+end_time = Sys.time()
+end_time - start_time
+
+st_write(filtered_parcels, "Regrid parcel data/Processed/central_valley_filtered_parcels_june6.gpkg")
+```
+
+## Join parcels with section
+
+Create a unique ID (my_parcel_num) for each parcel, since the parcel IDs can be duplicated in some cases. Spatially join these filtered parcels with the section they intersect. If a parcel intersects 2 sections, this will create a duplicate row for that parcel (ie: the parcel will have two rows, one for each section it intersects). We want this because we want to consider all possible sections a parcel could intersect rather than just the one it has most overlap with.
+
+```{r}
+filtered_parcels = st_read("Regrid parcel data/Processed/central_valley_filtered_parcels_june6.gpkg")%>%
+  mutate(my_parcel_num = row_number())
+
+filtered_parcels_with_section = st_join(filtered_parcels, filtered_sections)
+
+st_write(filtered_parcels_with_section, "Regrid parcel data/Processed/filtered_parcels_with_section_june11.gpkg")
+```
+
+## Well buffer
+
+Using spatial join, create a dataset of parcels that intersect with the designated buffer of any of the wells that had a geolocation geoaccuracy 50ft or less (which are make up the 'well_buffer' dataset). In cases where there are multiple rows for a given parcel, only keep the row where the section code (MTRS) matches that of the well whose buffer the parcel intersects.
+
+```{r}
+well_buffer_parcels = st_filter(filtered_parcels_with_section, well_buffer%>%select(ca_well_id, MTRS_well), .pred = st_intersects)%>%
+  st_join(., well_buffer)%>%
+  data.frame()%>%
+  filter(MTRS == MTRS_well)
+st_write(well_buffer_parcels, "Regrid parcel data/Processed/well_buffer_parcels_june11.gpkg")
+```
+
+# Matching wells with parcels
+
+## Prepare datasets
+
+Clean up the IDs, addresses, and such for wells and land parcels (ex: turn addresses to lowercase so capitalisation won't trip up any of the well-parcel matching)
+
+```{r}
+filtered_parcels_with_section = st_read("Regrid parcel data/Processed/filtered_parcels_with_section_june11.gpkg")%>%
+  data.frame()%>%
+  mutate(parcel_id = gsub("[- ]", "", parcel_id), 
+         parcelnumb_no_formatting = gsub("[- ]", "", parcelnumb_no_formatting),
+         address = str_to_lower(address),
+         mailadd = str_to_lower(mailadd),
+         address_st = str_to_lower(address_st),
+         owner = str_to_lower(owner))
+
+filtered_wells = st_read("GW well data/wells_filtered_june6.gpkg")%>%
+  data.frame()%>%
+  mutate(APN = gsub("[- ]", "", APN),
+         well_address = str_to_lower(well_address),
+         address_st = str_to_lower(address_st))
+
+well_buffer_parcels = st_read("Regrid parcel data/Processed/well_buffer_parcels_june11.gpkg")
+well_buffer_parcels_ids = unique(well_buffer_parcels$ca_well_id)
+```
+
+## Run matching loop
+
+Create an empty dataframe for each well and the section it falls in that
+we will populate with the parcel number it gets matched with (if any)
+and the matching method.
+
+```{r}
+matches = data.frame(my_parcel_num = NA, ca_well_id = filtered_wells$ca_well_id, string_dist = NA, match_method = NA, section = filtered_wells$MTRS)%>%
+  mutate(row_id = row_number())
+
+duplicate_parcels_list = list()
+```
+
+Loop through each well in our filtered well dataset. For each well, generate a dataframe of all the parcels that intersect with that well's section or the buffer around that well if applicable.
+
+Then, for each well, we go through our hierarchy for matching methods. First priority is if the well's section or buffer only has one parcel in it (which makes it easy for us!). Second is if the APN (Assessor Parcel Numbers) of the well and parcel address perfectly match. Third is if well address is a perfect match with a parcel in that section's address or mailing address. Fourth is if the number in the well and parcel address number is the exact same and the street name is very similar (less than 0.3 based on Jaro-Winkler string distance)
+
+```{r}
+for (i in 20739:nrow(filtered_wells)) {
+  
+  well = filtered_wells[i, ]
+  
+  #Get intersecting parcels
+  if (well$ca_well_id %in% well_buffer_parcels_ids) {
+    intersecting_parcels = filter(well_buffer_parcels, ca_well_id == well$ca_well_id)}
+  else {
+    intersecting_parcels = filter(filtered_parcels_with_section, MTRS == well$MTRS)}
+  
+  #Route 1: section only has 1 parcel in it
+  if (grepl("Irrigation", well$USGS.Water.Use.Category)){
+    intersecting_parcels_route1 = filter(intersecting_parcels, cropland_parcel == 1)}
+  else{intersecting_parcels_route1 = intersecting_parcels}
+  
+  if (nrow(intersecting_parcels_route1) == 1) {
+    matches$my_parcel_num[i] = intersecting_parcels_route1$my_parcel_num
+    matches$match_method[i] = if (well$ca_well_id %in% well_buffer_parcels_ids) "1 parcel in well buffer" else "1 parcel in section"
+    next} 
+  
+  #Route 2: APN match
+  if (!is.na(well$well_address) & well$well_address != ""){
+    apn_match = intersecting_parcels$parcel_id == well$APN | intersecting_parcels$parcelnumb_no_formatting == well$APN | intersecting_parcels$parcelnumb_no_formatting == sub("000$", "", well$APN)
+  apn_match[is.na(apn_match)] = FALSE
+    if (any(apn_match, na.rm = T)) {
+      matches$my_parcel_num[i] = intersecting_parcels$my_parcel_num[apn_match][1]
+      matches$match_method[i] = "APN match"
+      
+      if (length(intersecting_parcels$my_parcel_num[apn_match]) > 1) {
+        for (parcel_id in intersecting_parcels$my_parcel_num[apn_match]) {
+          duplicate_parcels_list[[length(duplicate_parcels_list) + 1]] = data.frame(type = "APN", id = parcel_id, i = i)}}
+      next}}
+  
+  #Route 3: well address is a perfect match with parcel address or mail address of parcel in section
+  address_match <- intersecting_parcels$address == well$well_address | intersecting_parcels$mailadd == well$well_address
+  address_match[is.na(address_match)] = F
+  if (any(address_match, na.rm = T)) {
+    matches$my_parcel_num[i] <- intersecting_parcels$my_parcel_num[address_match][1]
+    matches$match_method[i] <- "Perfect address match"
+    
+    if (length(intersecting_parcels$my_parcel_num[address_match]) > 1) {
+        for (parcel_id in intersecting_parcels$my_parcel_num[address_match]) {
+          duplicate_parcels_list[[length(duplicate_parcels_list) + 1]] = data.frame(type = "Address", id = parcel_id, i = i)}}
+      next}
+  
+  # Route 4: string distance
+  if (!is.na(well$address_no) & !is.na(well$address_st)){
+    intersecting_parcels = intersecting_parcels%>%
+      filter(address_st != "" & !is.na(address_st) & address_no != "0")
+  
+    address_number_match = intersecting_parcels$address_no == well$address_no
+    address_number_match[is.na(address_number_match)] = F
+    if (any(address_number_match, na.rm = T)) {
+      distances = stringdist(well$address_st, intersecting_parcels$address_st[address_number_match], method = "jw")
+      min_dist = which.min(distances)
+  
+      if (distances[min_dist] < 0.3) {
+        matches$my_parcel_num[i] <- intersecting_parcels$my_parcel_num[address_number_match][min_dist]
+        matches$match_method[i] <- "String distance match"
+        matches$string_dist[i] <- distances[min_dist]
+        next}}}}
+```
+
+Export our completed match dataset
+```{r}
+write.csv(matches, "Matches/matches_full.csv", row.names = F)
+```
+
+Diagnostics
+
+```{r}
+table(matches%>%filter(!is.na(my_parcel_num))%>%
+  left_join(., filtered_wells%>%select(ca_well_id, APN), by = "ca_well_id")%>%
+  left_join(., filtered_parcels_with_section%>%select(my_parcel_num, parcel_id, parcelnumb_no_formatting, MTRS), by = c("my_parcel_num" = "my_parcel_num", "section" = "MTRS"))%>%
+  pull(match_method))
+
+matches%>%filter(!is.na(my_parcel_num))%>%
+  left_join(., filtered_wells%>%select(ca_well_id, APN), by = "ca_well_id")%>%
+  left_join(., filtered_parcels_with_section%>%select(my_parcel_num, parcel_id, parcelnumb_no_formatting, MTRS), by = c("my_parcel_num" = "my_parcel_num", "section" = "MTRS"))
+```
+
+## Geocoding
+
+Prepare and export unmatched wells to geocode as excel file to read into ArcGIS for geocoding. Filter out any wells whose addresses are ungeocodable (ex: any part of the address is NA)
+
+```{r}
+matches = read.csv("Matches/matches_full.csv")
+
+matches
+
+wells_to_geocode = filtered_wells%>%
+  filter(ca_well_id %in% (matches%>%filter(is.na(my_parcel_num))%>%pull(ca_well_id)) & !is.na(well_address) & address_no != 0 & grepl("^[0-9]+$", address_no) & !is.na(city))%>%
+  mutate(state = "CA")
+
+write.xlsx(wells_to_geocode%>%select(ca_well_id, well_address, city, state), 'wells_to_geocode.xlsx', row.names = FALSE)
+```
+
+Conducted the geocoding in ArcGIS Pro, yielding a point shapefile. We can now import this shapefile back into R and only keep wells that got filtered
+to an actual address (rather than an intersection, POI, etc., which would mess up our spatial join with parcels). Spatially join geocoded wells to parcels.
+
+```{r}
+#pull geocoded wells back in from arcgis geocoding service and filter for actual addresses
+geocoded_wells = st_transform(st_read("geocoded_wells.shp"), crs = crs)%>%
+  filter(!is.na(Addr_type) & !Addr_type %in% c("StreetName", "StreetMidBlock", "Locality", "StreetInt", "POI") & Score > 90)%>%
+  select(USER_ca_we)%>%
+  rename(ca_well_id = 1)
+
+#spatial join geocoded points to parcels
+geocoded_wells_joined = geocoded_wells%>%
+  st_join(., filtered_parcels%>%select(my_parcel_num), join = st_within)%>%
+  filter(!is.na(my_parcel_num))%>%
+  rename(my_parcel_num_geocoded = 2)%>%
+  data.frame()%>%select(-geometry)
+```
+
+## Combine all matches together
+
+Join matches with geocoded matches. For any wells that didn't get matched but had a geocode match, use geocoded parcel number, otherwise keep original match.
+
+```{r}
+final_matches = matches%>%
+  left_join(., geocoded_wells_joined, by = "ca_well_id") %>%
+  mutate(
+    match_method = ifelse(is.na(my_parcel_num) & !is.na(my_parcel_num_geocoded), "Geocoded", match_method),
+    my_parcel_num = ifelse(is.na(my_parcel_num), my_parcel_num_geocoded, my_parcel_num))%>%
+  filter(!is.na(my_parcel_num))
+
+write.csv(final_matches, "Matches/final_matches_with_geocoding_august2.csv", row.names = F)
+```
+
+# Final processing
+
+## Combine datasets and covariates
+
+Now we want to join in all relevant info. Bring in relevant parcel data by joining by my_parcel_num. Bring in relevant well data by joining by ca_well_id.
+
+First, prepare relevant parcel data to join to matches. We want to filter for only parcels whose parcel_numbers are in our final match dataset. Then, we can join each parcel to the GW basin and subbasin that it has the largest overlap with. Finally, we select only the variables of interest for subsequent analysis.
+
+```{r}
+filtered_parcels_with_basin = filtered_parcels%>%
+  filter(my_parcel_num %in% final_matches$my_parcel_num)%>%
+  st_join(., gw_basins, join = st_intersects, largest = T)%>%
+  st_join(., filtered_sections%>%select(MTRS)%>%rename(parcel_MTRS = 1), join = st_intersects, largest = T)%>%
+  data.frame()%>%
+  select(usedesc:agval, owner:owner4, cdl_majority_category:cdl_majority_percent, fraction_cropland:my_parcel_num, basin_name:parcel_MTRS)
+```
+
+Now we can join the final match dataset with the relevant parcel and well data (for wells, we also select for only the variables of interest), yielding our final match dataset with all covariates included! We also filter for only wells in cropland parcels.
+
+```{r}
+final_matches_joined = final_matches%>%
+  left_join(., filtered_wells%>%
+              select(ca_well_id, Well.Depth..Feet., Well.Capacity..GPM., Year.Well.was.Constructed,
+                     USGS.Water.Use.Category), 
+            by = "ca_well_id")%>%
+  left_join(., filtered_parcels_with_basin, by = "my_parcel_num")%>%
+  filter(cropland_parcel == 1)%>%
+  rename(well_depth_ft = Well.Depth..Feet., well_capacity_gpm = Well.Capacity..GPM., well_year = Year.Well.was.Constructed)
+
+paste("We finally ended up with", nrow(final_matches_joined), "agricultural well-parcel matches!")
+write.csv(final_matches_joined, "Matches/matched wells with all well-parcel covariates, aug8.csv", row.names = F)
+```
+
+## Normalise variables
+
+Exclude public well-parcel owners from joined dataset. 
+
+Calculate land area and land value ownership percentiles (ex: 99th percentile is the percentile of owners who own the most land)
+```{r}
+exclude_owners = c("U S A|CITY OF|UNIVERSITY OF|COUNTY OF|STATE OF|SAN JOSE UNIFIED|USA 101|CALIFORNIA STATE|U C D|POSTAL SERVICE|SANITATION DIST|WATER DIST")
+
+final_matches_joined%>%
+  filter(!grepl(exclude_owners, owner) & !is.na(owner))%>%
+  group_by(owner)%>%
+  summarise(area_ha = sum(parcel_area_ha))%>%
+  arrange(-area_ha)
+
+final_matches_joined_filtered_owners = final_matches_joined%>%
+  filter(!grepl(exclude_owners, owner) & !is.na(owner))%>%
+  group_by(owner, subbasin_name)%>%
+  summarise(
+    #change any zeroes, infities, etc. to NA 
+    well_depth_ft = sum(well_depth_ft, na.rm = T), well_depth_ft = replace(well_depth_ft, well_depth_ft %in% c(0, Inf, -Inf), NA), 
+    well_capacity_gpm = sum(well_capacity_gpm, na.rm = T), well_capacity_gpm = replace(well_capacity_gpm, well_capacity_gpm %in% c(0, Inf, -Inf), NA),
+    newest_well = as.numeric(min(well_year, na.rm = T)),
+  
+    #change missing land values from 0 to NA
+    parcel_area_ha = sum(parcel_area_ha, na.rm = T),
+    ag_val = sum(agval, na.rm = T), ag_val = ifelse(ag_val == 0, NA, ag_val),
+    improved_val = sum(improvval, na.rm = T), improved_val = ifelse(improved_val == 0, NA, improved_val),
+    land_val = sum(landval, na.rm = T), land_val = ifelse(landval == 0, NA, landval))%>%
+  
+  ungroup()%>%
+  mutate(area_percentile = ntile(parcel_area_ha, 100),
+         land_val_percentile = ntile(land_val, 100),
+         improved_val_percentile = ntile(improved_val, 100),
+         ag_val_percentile = ntile(ag_val, 100))
+
+write.csv(final_matches_joined_filtered_owners, "Matches/final_matches_joined_filtered_owners_october3.csv", row.names = F)
+
+paste("After filtering out wells in publicly-owned land, our matched dataset consists of", nrow(final_matches_joined_filtered_owners), "well-parcel matches")
+```
+
+Variables of interest, such as well depth and well yield, might systematically vary across geographies (ex: due to geology or topology, parcels in one subbasin might have on average deeper wells, regardless of parcel size, than another subbasin). Therefore, as a robustness check, we want to normalise these variables, which we can accomplish by calculating a z-score for each well within the subbasin it is located in. We exclude any wells in subbasins with less than 30 wells, as per the Central Limit
+Theorem, the z-scores in these subbasins wouldn't be useful as a normalisation procedure.
+
+```{r}
+final_matches_joined_normalised = final_matches_joined_filtered_owners%>%
+  group_by(subbasin_name)%>%
+  mutate(subbasin_n = n(), 
+         depth_z_score = (well_depth_ft - mean(well_depth_ft, na.rm = T)) / sd(well_depth_ft, na.rm = T),
+         area_z_score = (parcel_area_ha - mean(parcel_area_ha, na.rm = T)) / sd(parcel_area_ha, na.rm = T),
+         yield_z_score = (well_capacity_gpm - mean(well_capacity_gpm, na.rm = T)) / sd(well_capacity_gpm, na.rm = T),
+         well_year_z_score = (newest_well - mean(newest_well, na.rm = T)) / sd(newest_well, na.rm = T),
+         agval_z_score = (ag_val - mean(ag_val, na.rm = T)) / sd(ag_val, na.rm = T),
+         landval_z_score = (land_val - mean(land_val, na.rm = T)) / sd(land_val, na.rm = T),
+         improved_val_z_score = (improved_val - mean(improved_val, na.rm = T)) / sd(improved_val, na.rm = T),
+         area_percentile_z = ntile(area_z_score, 100))%>%
+  ungroup()%>%
+  filter(subbasin_n >= 30)
+
+write.csv(final_matches_joined_normalised, "Matches/final_matches_joined_normalised_october3.csv", row.names = F)
+```
+
+# Analysis
+
+## Compile all processed datasets
+```{r}
+master_cropland_parcels = st_read("Regrid parcel data/Processed/central_valley_cropland_parcels_june6.gpkg")
+filtered_wells_df = st_read("GW well data/wells_filtered_june6.gpkg")%>%data.frame()
+filtered_sections = st_read("PLSS Sections/filtered_sections_june6.gpkg")
+final_matches_joined_normalised = read.csv("Matches/final_matches_joined_normalised_october3.csv")
+final_matches_joined_filtered_owners = read.csv("Matches/final_matches_joined_filtered_owners_october3.csv")
+wells = read.csv("GW well data/USGWD_California.csv")
+gw_basins = st_transform(st_read("Bulletin 118 Groundwater Basin Boundaries/Bulletin 118 Groundwater Basin Boundary GIS Data - v6_2/Shapefile/Shapefile/i08_B118_v6_2.shp"), crs)%>%
+  dplyr::select(1:4)%>%
+  rename(basin_number = 1, subbasin_number = 2, basin_name = 3, subbasin_name = 4)
+```
+
+
+
+## Inequality
+
+### Gini of land
+
+Here, we assess inequality in the distribution of cropland. We do this for cropland parcels with a well match, and as a robustness check, but for all cropland parcels in the Central Valley. Again, we aggregate by subbasin so that nearby farms with the same owner are considered as such rather than separate entities.
+
+```{r}
+master_cropland_parcels = st_read("Regrid parcel data/Processed/central_valley_cropland_parcels_june6.gpkg")%>%
+  st_join(., gw_basins%>%select(basin_name:subbasin_name), join = st_intersects, largest = T)%>%
+  st_join(., filtered_sections%>%select(MTRS)%>%rename(parcel_MTRS = 1), join = st_intersects, largest = T)%>%
+  data.frame()%>%
+  select(-geom)
+
+#write.csv(master_cropland_parcels, "Regrid parcel data/Processed/cropland_parcels_joined_aug23.csv", row.names = F)
+rm(master_cropland_parcels)
+```
+
+Filter out publicly owned land, aggregate parcels by owner and subbasin, and created version of the dataset with key variables normalised by subbasin.
+
+```{r}
+cropland_parcels_df = read.csv("Regrid parcel data/Processed/cropland_parcels_joined_aug23.csv")
+
+cropland_parcels_filtered_owners = cropland_parcels_df%>%
+  filter(!grepl(exclude_owners, owner) & !is.na(owner))%>%
+  group_by(owner, subbasin_name)%>%
+  summarise(parcel_area_ha = sum(parcel_area_ha, na.rm = T),
+            improvval = sum(improvval, na.rm = T),
+            landval = sum(landval, na.rm = T),
+            agval = sum(agval, na.rm = T))%>%
+  mutate(across(where(is.numeric), ~ na_if(., 0)))
+
+cropland_parcels_normalised = cropland_parcels_filtered_owners%>%
+  group_by(subbasin_name)%>%
+  mutate(subbasin_n = n(),
+         area_z_score = (parcel_area_ha - mean(parcel_area_ha, na.rm = T)) / sd(parcel_area_ha, na.rm = T))%>%
+  ungroup()%>%
+  filter(subbasin_n >= 30)%>%
+  mutate(area_z_score = area_z_score - min(area_z_score))
+```
+
+Let's calculate the gini coefficients for land area, improved parcel
+value, land value, and agricultural value.
+
+```{r}
+paste("Gini for land area owned:", round(ineq(cropland_parcels_filtered_owners$parcel_area_ha), 3))
+paste("Gini for improved value of land owned:", round(ineq(cropland_parcels_filtered_owners$improvval), 3))
+paste("Gini for land value of land owned:", round(ineq(cropland_parcels_filtered_owners$landval), 3))
+paste("Gini for agricultural value of land owned:", round(ineq(cropland_parcels_filtered_owners$agval), 3))
+
+nrow(cropland_parcels_filtered_owners%>%filter(!is.na(parcel_area_ha)))
+nrow(cropland_parcels_filtered_owners%>%filter(!is.na(improvval)))
+nrow(cropland_parcels_filtered_owners%>%filter(!is.na(landval)))
+nrow(cropland_parcels_filtered_owners%>%filter(!is.na(agval)))
+
+cropland_parcels_filtered_owners
+
+#plot(Lc(cropland_parcels_normalised$parcel_area_ha))
+#ineq(cropland_parcels_normalised$area_z_score)
+```
+
+Gini is highest for ag value.
+
+Let's compare this to the ginis when just looking at the subset of
+parcels with matched wells
+
+```{r}
+paste("Gini for land area owned:", round(ineq(final_matches_joined_filtered_owners$parcel_area_ha), 3))
+paste("Gini for improved value of land owned:", round(ineq(final_matches_joined_filtered_owners$improved_val), 3))
+paste("Gini for land value of land owned:", round(ineq(final_matches_joined_filtered_owners$land_val), 3))
+paste("Gini for agricultural value of land owned:", round(ineq(final_matches_joined_filtered_owners$ag_val), 3))
+
+nrow(final_matches_joined_filtered_owners%>%filter(!is.na(parcel_area_ha)))
+nrow(final_matches_joined_filtered_owners%>%filter(!is.na(improved_val)))
+nrow(final_matches_joined_filtered_owners%>%filter(!is.na(land_val)))
+nrow(final_matches_joined_filtered_owners%>%filter(!is.na(ag_val)))
+```
+
+It varies quite a bit (sometimes higher, sometimes lower). I would
+probably trust all cropland parcels more? Ask Paolo.
+
+### Gini of water
+
+Here, we investigate the gini coefficient for well depth and well
+capacity as metrics of groundwater access. We perform this analysis for
+matched wells, and as a robustness check, for all wells marked for
+irrigation use.
+
+```{r}
+#only matched wells, filtering out public wells
+paste("Gini for well depth:", round(ineq(final_matches_joined_filtered_owners$well_depth_ft), 3))
+paste("Gini for well capacity:", round(ineq(final_matches_joined_filtered_owners$well_capacity_gpm), 3))
+
+nrow(final_matches_joined_filtered_owners%>%filter(!is.na(well_capacity_gpm)))
+nrow(final_matches_joined_filtered_owners%>%filter(!is.na(well_depth_ft)))
+
+
+final_matches_joined_filtered_owners
+
+#only matched wells filtering out public wells (normalised)
+#ineq(final_matches_joined_normalised$depth_z_score - min(final_matches_joined_normalised$depth_z_score, na.rm = T))
+#ineq(final_matches_joined_normalised$yield_z_score - min(final_matches_joined_normalised$yield_z_score, na.rm = T))
+```
+
+```{r}
+#all wells
+paste("Gini for well depth:", round(ineq(wells%>%filter(grepl("Irrigation", USGS.Water.Use.Category))%>%pull(Well.Depth..Feet.)), 3))
+paste("Gini for well depth:", round(ineq(wells%>%filter(grepl("Irrigation", USGS.Water.Use.Category))%>%pull(Well.Capacity..GPM.)), 3))
+
+nrow(wells%>%filter(!is.na(Well.Capacity..GPM.)))
+nrow(wells%>%filter(!is.na(Well.Depth..Feet.)))
+```
+
+Well capacity appears to be more unequally distributed across Central
+Valley well owners compared to well depth. This makes sense, as we would
+expect well capacity (as the actual volume that can be pumped out) would
+correlate more directly to groundwater access / ownership.
+
+### Land-water
+
+Now, let's explore relationships between land ownership and groundwater
+access.
+
+First, let's just make some scatter plots of land area vs metrics of
+groundwater access (well depth and well yield). We do this
+
+```{r}
+options(scipen = 999)
+final_matches_joined_normalised%>%
+  ggplot(aes(area_z_score, depth_z_score))+
+  geom_point(colour = "#410505")+
+  scale_x_log10()+
+  scale_y_log10()+
+  labs(x = "Parcel Area Z-Score", y = "Well Depth Z-Score")+
+  geom_smooth(method = "lm", linetype = "dashed", color = "coral3", fill = "coral1") +
+  theme_bw()
+final_matches_joined_filtered_owners%>%
+  ggplot(aes(parcel_area_ha, well_depth_ft))+
+  geom_point(colour = "#410505")+
+  scale_x_log10()+
+  scale_y_log10()+
+  labs(x = "Parcel Area (ha)", y = "Well Depth (ft)")+
+  geom_smooth(method = "lm", linetype = "dashed", color = "coral3", fill = "coral1") +
+  theme_bw()
+
+final_matches_joined_normalised%>%
+  ggplot(aes(area_z_score, yield_z_score))+
+  geom_point(colour = "midnightblue")+
+  scale_x_log10()+
+  scale_y_log10()+
+  labs(x = "Parcel Area Z-Score", y = "Well Capacity Z-Score")+
+  geom_smooth(method = "lm", linetype = "dashed", color = "skyblue4", fill = "skyblue2") +
+  theme_bw()
+final_matches_joined_filtered_owners%>%
+  ggplot(aes(parcel_area_ha, well_capacity_gpm))+
+  geom_point(colour = "midnightblue")+
+  scale_x_log10()+
+  scale_y_log10()+
+  labs(x = "Parcel Area (ha)", y = "Well Capacity (gpm)")+
+  geom_smooth(method = "lm", linetype = "dashed", color = "skyblue4", fill = "skyblue2") +
+  theme_bw()
+final_matches_joined_normalised%>%
+  ggplot(aes(parcel_area_ha, yield_z_score))+
+  geom_point(colour = "midnightblue")+
+  scale_x_log10()+
+  scale_y_log10()+
+  labs(x = "Parcel Area (ha)", y = "Well Capacity (gpm)")+
+  geom_smooth(method = "lm", linetype = "dashed", color = "skyblue4", fill = "skyblue2") +
+  theme_bw()
+```
+
+The relationship looks relatively linear on the plots, which considering
+the log x and log y axes, means that the true relationship between
+normalised parcel area and normalised well metrics is non-linear (power
+log, to be precise).
+
+Now, let's visualise by percentile of land owned to make it easier to
+pick out this trend.
+
+Well Yield
+
+```{r}
+#Land percentile based on parcel area
+final_matches_joined_filtered_owners%>%
+  group_by(area_percentile)%>%
+  summarise(mean = mean(well_capacity_gpm, na.rm = T))%>%
+  ggplot(aes(area_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Area Owned", y = "Mean Well Capacity (GPM)")
+
+final_matches_joined_normalised%>%
+  group_by(area_percentile)%>%
+  summarise(mean = mean(yield_z_score, na.rm = T))%>%
+  ggplot(aes(area_percentile, mean))+
+  geom_point()+
+  #scale_x_discrete(breaks = seq(10, 100, by = 10))+
+  theme_bw()+
+  labs(x = "Percentile of Land Area Owned", y = "Mean Well Capacity Z-Score")
+
+#Land percentile based on parcel area normalised (z-score) by subbasin
+final_matches_joined_normalised%>%
+  group_by(area_percentile_z)%>%
+  summarise(mean = mean(well_capacity_gpm, na.rm = T))%>%
+  ggplot(aes(area_percentile_z, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Area Owned (Normalised)", y = "Mean Well Capacity (GPM)")
+final_matches_joined_normalised%>%
+  group_by(area_percentile_z)%>%
+  summarise(mean = mean(yield_z_score, na.rm = T))%>%
+  ggplot(aes(area_percentile_z, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Area Owned (Normalised)", y = "Mean Well Capacity Z-Score")
+```
+
+Here we clearly see the same trend: the curve is clearly non-linear,
+indicating that those who own more cropland have disproportionately more
+access to groundwater in terms of well depth and well capacity. This is
+robust to normalising both well capacity and land area owned by subbasin
+as well.
+
+Well Depth
+
+```{r}
+final_matches_joined_normalised%>%
+  group_by(area_percentile)%>%
+  summarise(mean = mean(well_depth_ft, na.rm = T))%>%
+  ggplot(aes(area_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Area Owned", y = "Mean Well Depth (ft)")
+final_matches_joined_normalised%>%
+  group_by(area_percentile)%>%
+  summarise(mean = mean(depth_z_score, na.rm = T))%>%
+  ggplot(aes(area_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Area Owned", y = "Mean Well Depth Z-Score")
+
+final_matches_joined_normalised%>%
+  group_by(area_percentile_z)%>%
+  summarise(mean = mean(well_depth_ft, na.rm = T))%>%
+  ggplot(aes(area_percentile_z, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Area Owned (Normalised)", y = "Mean Well Depth (ft)")
+final_matches_joined_normalised%>%
+  group_by(area_percentile_z)%>%
+  summarise(mean = mean(depth_z_score, na.rm = T))%>%
+  ggplot(aes(area_percentile_z, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Area Owned (Normalised) ", y = "Mean Well Depth Z-Score")
+```
+
+Lastly, let's see how other land ownership metrics, such as land value,
+play out with these trends
+
+Land value
+
+```{r}
+final_matches_joined_normalised%>%
+  group_by(land_val_percentile)%>%
+  summarise(mean = mean(depth_z_score, na.rm = T))%>%
+  ggplot(aes(land_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Value Owned (Normalised)", y = "Mean Well Depth Z-Score")
+final_matches_joined_filtered_owners%>%
+  group_by(land_val_percentile)%>%
+  summarise(mean = mean(well_depth_ft, na.rm = T))%>%
+  ggplot(aes(land_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Value Owned", y = "Mean Well Depth Z-Score")
+
+
+final_matches_joined_normalised%>%
+  group_by(land_val_percentile)%>%
+  summarise(mean = mean(yield_z_score, na.rm = T))%>%
+  ggplot(aes(land_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Value Owned (Normalised)", y = "Mean Well Capacity Z-Score")
+final_matches_joined_filtered_owners%>%
+  group_by(land_val_percentile)%>%
+  summarise(mean = mean(well_capacity_gpm, na.rm = T))%>%
+  ggplot(aes(land_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Value Owned", y = "Mean Well Capacity Z-Score")
+```
+
+Improved value
+
+```{r}
+final_matches_joined_normalised%>%
+  group_by(improved_val_percentile)%>%
+  summarise(mean = mean(depth_z_score, na.rm = T))%>%
+  ggplot(aes(improved_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Improved Land Value Owned (Normalised)", y = "Mean Well Depth Z-Score")
+final_matches_joined_filtered_owners%>%
+  group_by(improved_val_percentile)%>%
+  summarise(mean = mean(well_depth_ft, na.rm = T))%>%
+  ggplot(aes(improved_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Improved Land Value Owned", y = "Mean Well Depth (ft)")
+
+
+final_matches_joined_normalised%>%
+  group_by(improved_val_percentile)%>%
+  summarise(mean = mean(yield_z_score, na.rm = T))%>%
+  ggplot(aes(improved_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Improved Land Value Owned (Normalised)", y = "Mean Well Capacity Z-Score")
+final_matches_joined_filtered_owners%>%
+  group_by(improved_val_percentile)%>%
+  summarise(mean = mean(well_capacity_gpm, na.rm = T))%>%
+  ggplot(aes(improved_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Improved Land Value Owned", y = "Mean Well Capacity (gpm)")
+
+```
+
+Agricultural value
+
+```{r}
+final_matches_joined_normalised%>%
+  group_by(ag_val_percentile)%>%
+  summarise(mean = mean(depth_z_score, na.rm = T))%>%
+  ggplot(aes(ag_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Agricultural Land Value Owned", y = "Mean Well Depth Z-Score")
+final_matches_joined_filtered_owners%>%
+  group_by(ag_val_percentile)%>%
+  summarise(mean = mean(well_depth_ft, na.rm = T))%>%
+  ggplot(aes(ag_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Agricultural Land Value Owned", y = "Mean Well Depth (ft)")
+
+
+final_matches_joined_normalised%>%
+  group_by(ag_val_percentile)%>%
+  summarise(mean = mean(yield_z_score, na.rm = T))%>%
+  ggplot(aes(ag_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Agricultural Land Value Owned", y = "Mean Well Capacity Z-Score")
+final_matches_joined_filtered_owners%>%
+  group_by(ag_val_percentile)%>%
+  summarise(mean = mean(well_capacity_gpm, na.rm = T))%>%
+  ggplot(aes(ag_val_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Agricultural Land Value Owned", y = "Mean Well Capacity (gpm)")
+```
+
+```{r}
+final_matches_joined_normalised%>%
+  group_by(area_percentile)%>%
+  summarise(mean = mean(newest_well, na.rm = T))%>%
+  ggplot(aes(area_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Area Owned", y = "Mean Newest Well Year")
+final_matches_joined_normalised%>%
+  group_by(area_percentile)%>%
+  summarise(mean = mean(well_year_z_score, na.rm = T))%>%
+  ggplot(aes(area_percentile, mean))+
+  geom_point()+
+  theme_bw()+
+  labs(x = "Percentile of Land Area Owned", y = "Mean Newest Well Year Z-Score")
+```
+
+```{r}
+total_yield = sum(final_matches_joined_filtered_owners%>%filter(!is.na(well_capacity_gpm))%>%pull(well_capacity_gpm), na.rm = T)
+total_area = sum(final_matches_joined_filtered_owners%>%filter(!is.na(well_capacity_gpm))%>%pull(parcel_area_ha), na.rm = T)
+
+final_matches_joined_filtered_owners %>%
+  arrange(well_capacity_gpm)%>%  # Sort by well capacity
+  filter(!is.na(well_capacity_gpm))%>%
+  select(parcel_area_ha, well_capacity_gpm)%>%
+  mutate(
+    cum_land = cumsum(parcel_area_ha) / total_area ,
+    cum_yield = cumsum(well_capacity_gpm) / total_yield)%>%
+  arrange(parcel_area_ha)%>%
+  ggplot(aes(x = cum_land, y = cum_yield)) +
+    geom_point(color = "blue", size = 1.2) +   # Lorenz curve
+    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed", size = 1.2) +  # Line of equality
+    labs(
+      title = "Lorenz Curve of Well Yield Owned by Land Area Owned",
+      y = "Cumulative Share of Water Yield for Wells Owned",
+      x = "Cumulative Share of Land Area Owned") +
+    theme_minimal()
+
+
+total_depth= sum(final_matches_joined_filtered_owners%>%filter(!is.na(well_depth_ft))%>%pull(well_depth_ft), na.rm = T)
+total_area = sum(final_matches_joined_filtered_owners%>%filter(!is.na(well_depth_ft))%>%pull(parcel_area_ha), na.rm = T)
+
+final_matches_joined_filtered_owners %>%
+  arrange(well_depth_ft)%>%  # Sort by well depth
+  filter(!is.na(well_depth_ft))%>%
+  select(parcel_area_ha, well_depth_ft)%>%
+  mutate(
+    cum_land = cumsum(parcel_area_ha)/total_area,
+    cum_depth = cumsum(well_depth_ft)/total_depth)%>%
+  arrange(parcel_area_ha)%>%
+  ggplot(aes(x = cum_land, y = cum_depth)) +
+    geom_point(color = "blue", size = 1.2) +   # Lorenz curve
+    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed", size = 1.2) +  # Line of equality
+    labs(
+      title = "Lorenz Curve of Well Depth Owned by Land Area Owned",
+      y = "Cumulative Share of Water Depth for Wells Owned",
+      x = "Cumulative Share of Land Area Owned") +
+    theme_minimal()
+```
+
+For each farm, calculate water per unit area (well yield or well depth /
+ha) and see what the distribution of that variable. plot area vs well
+depth per area
+
+```{r}
+final_matches_joined_filtered_owners%>%
+  mutate(depth_per_ha = well_depth_ft / parcel_area_ha,
+         capacity_per_ha = well_capacity_gpm / parcel_area_ha)%>%
+  group_by(area_percentile)%>%
+  summarise(mean_depth = mean(depth_per_ha, na.rm = T))%>%
+  ggplot(aes(area_percentile, mean_depth))+
+    geom_point()+
+    theme_bw()+
+    labs(x = "Percentile of Land Area Owned", y = "Mean Well Depth per Hectare \n (ft per ha)")+
+    scale_y_log10()
+
+final_matches_joined_filtered_owners%>%
+  mutate(depth_per_ha = well_depth_ft / parcel_area_ha,
+         capacity_per_ha = well_capacity_gpm / parcel_area_ha)%>%
+  group_by(area_percentile)%>%
+  summarise(mean_yield = mean(capacity_per_ha, na.rm = T))%>%
+  ggplot(aes(area_percentile, mean_yield))+
+    geom_point()+
+    theme_bw()+
+    labs(x = "Percentile of Land Area Owned", y = "Mean Well Capacity per Hectare \n (GPM per ha)")+
+    scale_y_log10()
+```
+
+Do you see more value per unit land area for parcels that have more gw
+water access (well depth or well yield)
+
+```{r}
+final_matches_joined_filtered_owners%>%
+  mutate(depth_percentile = ntile(well_depth_ft, 100), value_per_ha = land_val/parcel_area_ha)%>%
+  group_by(depth_percentile)%>%
+  reframe(value_per_ha = mean(value_per_ha, na.rm = T))%>%
+  ggplot(aes(depth_percentile, value_per_ha))+
+    geom_point()+
+    theme_bw()+
+    labs(x = "Percentile of Well Depth Ownership", y = "Land Value per ha ($/ha)")
+
+final_matches_joined_filtered_owners%>%
+  mutate(depth_percentile = ntile(well_depth_ft, 100),value_per_ha = improved_val/parcel_area_ha)%>%
+  group_by(depth_percentile)%>%
+  reframe(value_per_ha = mean(value_per_ha, na.rm = T))%>%
+  ggplot(aes(depth_percentile, value_per_ha))+
+    geom_point()
+
+final_matches_joined_filtered_owners%>%
+  mutate(depth_percentile = ntile(well_depth_ft, 100),value_per_ha = ag_val/parcel_area_ha)%>%
+  group_by(depth_percentile)%>%
+  reframe(value_per_ha = mean(value_per_ha, na.rm = T))%>%
+  ggplot(aes(depth_percentile, value_per_ha))+
+    geom_point()
+```
+
+```{r}
+final_matches_joined_filtered_owners%>%
+  mutate(yield_percentile = ntile(well_capacity_gpm, 100), value_per_ha = land_val/parcel_area_ha)%>%
+  group_by(yield_percentile)%>%
+  reframe(value_per_ha = mean(value_per_ha, na.rm = T))%>%
+  ggplot(aes(yield_percentile, value_per_ha))+
+    geom_point()+
+    theme_bw()+
+    labs(x = "Percentile of Well Capacity Ownership", y = "Land Value per ha ($/ha)")
+  
+
+final_matches_joined_filtered_owners%>%
+  mutate(yield_percentile = ntile(well_capacity_gpm, 100),value_per_ha = improved_val/parcel_area_ha)%>%
+  group_by(yield_percentile)%>%
+  reframe(value_per_ha = mean(value_per_ha, na.rm = T))%>%
+  ggplot(aes(yield_percentile, value_per_ha))+
+    geom_point()
+final_matches_joined_filtered_owners%>%
+  mutate(yield_percentile = ntile(well_capacity_gpm, 100),value_per_ha = ag_val/parcel_area_ha)%>%
+  group_by(yield_percentile)%>%
+  reframe(value_per_ha = mean(value_per_ha, na.rm = T))%>%
+  ggplot(aes(yield_percentile, value_per_ha))+
+    geom_point()
+```
+
+## More descriptive stuff
+
+### Precipitation and land size
+
+Use chirps back to 1981
+
+1.  Get mean annual precipitation by parcel. Relationship between precip
+    and parcel size / parcel value
+2.  By GW basin (or other boundary), relationship between mean
+    precipitation and land inequality
+3.  By GW basin (or other boundary), relationship between mean
+    precipitation and mean land size/value
+
+```{r}
+precip = rast("Precipitation data/chirps-v2.0.annual.nc")
+
+parcel_precip_means <- exact_extract(crop(precip, ext(master_cropland_parcels)), master_cropland_parcels, 'mean', force_df = TRUE)%>%
+  rename_with(~ as.character(1981:2023))%>%
+  mutate(mean_annual_precip = rowMeans(across(everything())))%>%
+  pull(mean_annual_precip)
+
+master_cropland_parcels_df = master_cropland_parcels%>%
+  mutate(mean_annual_precip = parcel_precip_means)%>%
+  data.frame()
+
+master_cropland_parcels_df
+
+summary(lm(data = master_cropland_parcels_df, parcel_area_ha ~ mean_annual_precip))
+```
+
+```{r}
+subbasin_precip_means <- exact_extract(crop(precip, ext(gw_basins)), gw_basins, 'mean', force_df = TRUE)%>%
+  rename_with(~ as.character(1981:2023))%>%
+  mutate(mean_annual_precip = rowMeans(across(everything())))%>%
+  pull(mean_annual_precip)
+gw_basins = gw_basins%>%
+  mutate(mean_annual_precip = subbasin_precip_means)%>%
+  filter(basin_number %in% c("5-022", "5-021"))
+
+stats_by_subbasin = final_matches_joined_filtered_owners%>%
+  group_by(subbasin_name)%>%
+  reframe(
+          median_parcel_area = median(parcel_area_ha, na.rm = T),
+          gini_parcel_area = ineq(parcel_area_ha, na.rm = T),
+          median_well_capacity = median(well_capacity_gpm, na.rm = T),
+          median_well_depth = median(well_depth_ft, na.rm = T),
+          median_well_depth = median(well_depth_ft, na.rm = T),
+          gini_well_capacity = ineq(well_capacity_gpm, na.rm = T),
+          gini_well_depth = ineq(well_depth_ft, na.rm = T),
+          gini_land_value = ineq(land_val, na.rm =  T),
+          gini_ag_value = ineq(ag_val, na.rm = T),
+          gini_improved_value = ineq(improved_val, na.rm = T),
+          n = n())%>%
+  filter(n > 10)
+
+gw_basins_full = merge(gw_basins%>%select(subbasin_number, subbasin_name, mean_annual_precip), stats_by_subbasin)
+```
+
+
+```{r}
+library(classInt)
+round_to_5 <- function(x) {round(x / 5) * 5}
+
+tmap_mode("view")
+tmap_mode("plot")
+
+#precip
+tm_shape(gw_basins) +
+  tm_polygons(col = "mean_annual_precip", palette = "Blues", title = "Mean Annual Precipitation (mm)") 
+
+
+#parcel area
+jenks_breaks <- round_to_5(classIntervals(gw_basins_full$median_parcel_area, n = 5, style = "jenks")$brks)
+tm_shape(gw_basins_full) +
+  tm_polygons("median_parcel_area", breaks = jenks_breaks, palette = "Reds", title = "Median Parcel Area (ha)") 
+
+jenks_breaks <- round_to_5(classIntervals(gw_basins_full$gini_parcel_area, n = 5, style = "jenks")$brks)
+tm_shape(gw_basins_full) +
+  tm_polygons(col = "gini_parcel_area", palette = "Blues", title = "Gini Coefficient of Parcel Area") 
+
+
+#land value
+jenks_breaks <- round_to_5(classIntervals(gw_basins_full$gini_land_value, n = 5, style = "jenks")$brks)
+tm_shape(gw_basins_full) +
+  tm_polygons(col = "gini_land_value", palette = "Purples", title = "Gini Coefficient of Land Value") 
+
+jenks_breaks <- round_to_5(classIntervals(gw_basins_full$gini_improved_value, n = 5, style = "jenks")$brks)
+tm_shape(gw_basins_full) +
+  tm_polygons(col = "gini_improved_value", palette = "Purples", title = "Gini Coefficient of Improved Land Value")
+
+#well capacity
+jenks_breaks <- round_to_5(classIntervals(gw_basins_full$median_well_capacity, n = 5, style = "jenks")$brks)
+tm_shape(gw_basins_full) +
+  tm_polygons(col = "median_well_capacity", palette = "Blues", title = "Median Well Capacity (GPM)") 
+jenks_breaks <- round_to_5(classIntervals(gw_basins_full$gini_well_capacity, n = 5, style = "jenks")$brks)
+tm_shape(gw_basins_full) +
+  tm_polygons(col = "gini_well_capacity", palette = "Blues", title = "Gini Coefficient of Well Capacity") 
+
+#well depth
+jenks_breaks <- round_to_5(classIntervals(gw_basins_full$median_well_depth, n = 5, style = "jenks")$brks)
+tm_shape(gw_basins_full) +
+  tm_polygons(col = "median_well_depth", palette = "RdPu", title = "Median Well Depth (ft)") 
+jenks_breaks <- round_to_5(classIntervals(gw_basins_full$gini_well_depth, n = 5, style = "jenks")$brks)
+tm_shape(gw_basins_full) +
+  tm_polygons(col = "gini_well_depth", palette = "RdPu", title = "Gini Coefficient of Well Depth") 
+
+gw_basins_full%>%
+  ggplot(aes(mean_annual_precip, gini_well_capacity))+
+  geom_point()+
+  theme_bw()
+gw_basins_full%>%
+  ggplot(aes(mean_annual_precip, gini_well_depth))+
+  geom_point()+
+  theme_bw()
+gw_basins_full%>%
+  ggplot(aes(mean_annual_precip, median_well_capacity))+
+  geom_point()+
+  theme_bw()
+gw_basins_full%>%
+  ggplot(aes(mean_annual_precip, median_well_depth))+
+  geom_point()+
+  theme_bw()
+```
+
+
+```{r}
+summary(lm(data = gw_basins_full, median_parcel_area ~ mean_annual_precip))
+summary(lm(data = gw_basins_full, median_well_depth ~ mean_annual_precip))
+summary(lm(data = gw_basins_full, median_well_capacity ~ mean_annual_precip))
+
+summary(lm(data = gw_basins_full, gini_parcel_area ~ mean_annual_precip)) 
+summary(lm(data = gw_basins_full, gini_well_depth ~ mean_annual_precip))
+summary(lm(data = gw_basins_full, gini_well_capacity ~ mean_annual_precip)) #sig
+summary(lm(data = gw_basins_full, gini_land_value ~ mean_annual_precip))
+summary(lm(data = gw_basins_full, gini_ag_value ~ mean_annual_precip)) #sig
+summary(lm(data = gw_basins_full, gini_improved_value ~ mean_annual_precip)) 
+
+```
+
+### Critical depletion stuff
+
+Options. Relationship between GW basin's critical depletion rating
+and: 1. Mean well depth/yield? 2. Water inequality metric 3. Mean land
+size/value 4. Land inequality metric 5. Steepness of land-water
+relationship (aka, in more critical depleted aquifers, is the
+relationship between land ownership and gw access amplified?)
+
+Critically overdrafted subbasins obtained from [CA Dept of Water
+Resources](https://water.ca.gov/-/media/DWR-Website/Web-Pages/Programs/Groundwater-Management/Basin-Prioritization/Files/CODBasins_websitemapPAO_a_20y.pdf)
+
+```{r}
+overdrafted_subbasins = c("5-022.01", "5-022.04", "5-022.05", "5-022.06", "5-022.07", "5-022.08", "5-022.09", "5-022.11", "5-022.12", "5-022.13", "5-022.14", "6-054")
+
+gw_basins_full = gw_basins_full%>%
+  mutate(critically_overdrafted = as.factor(ifelse(subbasin_number %in% overdrafted_subbasins, 1, 0)))
+
+summary(lm(data = gw_basins_full, gini_well_capacity ~ critically_overdrafted))
+summary(lm(data = gw_basins_full, gini_well_depth ~ critically_overdrafted))
+summary(lm(data = gw_basins_full, gini_improved_value ~ critically_overdrafted))
+
+ggplot(gw_basins_full, aes(critically_overdrafted, gini_well_capacity))+
+  geom_boxplot(fill = "coral1")+
+  theme_bw()+
+  labs(x = "Critically Overdrafted Status", y = "Gini Coefficient of Well Capacity")
+ggplot(gw_basins_full, aes(critically_overdrafted, median_well_capacity))+
+  geom_boxplot()+
+  theme_bw()
+ggplot(gw_basins_full, aes(critically_overdrafted, gini_well_depth))+
+  geom_boxplot(fill = "skyblue2")+
+  theme_bw()+
+  labs(x = "Critically Overdrafted Status", y = "Gini Coefficient of Well Depth")
+ggplot(gw_basins_full, aes(critically_overdrafted, median_well_depth))+
+  geom_boxplot()+
+  theme_bw()
+
+
+t.test(gini_well_capacity ~ critically_overdrafted, data = gw_basins_full)
+wilcox.test(gini_well_capacity ~ critically_overdrafted, data = gw_basins_full)
+
+t.test(median_well_depth ~ critically_overdrafted, data = gw_basins_full, var.equal = TRUE)
+
+```
+
+## Crop trends
+
+```{r}
+#MAKE SURE TO FILTER OUT PUBLIC LANDS
+cropland_parcels_w_crop_mode = master_cropland_parcels%>%
+  filter(!owner %in% exclude_owners)%>%
+  mutate(exact_extract(cropland_extent_raster, master_cropland_parcels, fun = "mode", progress = TRUE))%>%
+  st_join(., gw_basins%>%select(basin_name:subbasin_name), join = st_intersects, largest = T)%>%
+  data.frame()%>%
+  left_join(., data.frame(levels(cropland_extent_raster)), by = c("exact_extract....." = "Value"))%>%
+  filter(!grepl("Developed|Fallow|Wetlands|Pasture|Shrubland|Grass Seed|Open Water|Forest|Barren|Aquaculture", Class_Name))%>%
+  mutate(
+    crop_group = case_when(
+      grepl("Chickpea|Dry Beans|Peas|Vetch|Clover", Class_Name) ~ "Legumes",
+      grepl("Safflower|Flaxseed|Canola|Sunflower", Class_Name) ~ "Oil Crops",
+      grepl("Apple|Appricot|Avocado|Cantaloupe|Cherries|Citrus|Grapes|Nectarines|Peaches|Pears|Plums|Pomegranate|Olive|Watermelon|Melons", Class_Name) ~ "Fruits",
+      grepl("Almond|Walnut|Pecan|Pistachio", Class_Name) ~ "Nuts",
+      grepl("Broccoli|Cabbage|Carrot|Cucumber|Garlic|Lettuce|Pepper|Onion|Pumpkin|Squash|Tomato|Turnip|Greens|Herbs", Class_Name) ~ "Vegetables",
+      grepl("Barley|Corn|Wheat|Oats|Rice|Rye|Sorghum|Dbl Crop|Triticale", Class_Name) ~ "Grains"),
+    crop_group_broad = case_when(
+      crop_group %in% c("Legumes", "Grains") | Class_Name == "Alfalfa" ~ "Staple",
+      crop_group %in% c("Oil Crops, Fruits, Vegetables, Nuts") | grepl("Misc Vegs|Other Tree Crops|Sugarbeets", Class_Name) ~ "Cash Crop"))
+
+
+cropland_parcels_w_crop_mode%>%
+  group_by(owner, basin_name)%>%
+  reframe(parcel_area_ha = sum(parcel_area_ha))%>%
+  group_by(crop_group_broad)%>%
+  reframe(crop_area_gini = ineq(parcel_area_ha))
+cropland_parcels_w_crop_mode%>%
+  group_by(crop_group)%>%
+  reframe(crop_area_gini = ineq(parcel_area_ha))
+cropland_parcels_w_crop_mode%>%
+  group_by(Class_Name)%>%
+  reframe(crop_area_gini = ineq(parcel_area_ha))
+
+master_cropland_parcels%>%data.frame()%>%
+  group_by(owner, )
+
+final_matches_joined_filtered_owners
+
+final_matches_joined_filtered_owners%>%
+  mutate(crop = exact_extract(cropland_extent_raster, final_matches_joined_filtered_owners, fun = "mode", progress = TRUE))%>%
+  left_join(., data.frame(levels(cropland_extent_raster)), by = c("crop" = "Value"))%>%
+  filter(!grepl("Developed|Fallow|Wetlands|Pasture|Shrubland|Grass Seed|Open Water|Forest|Barren|Aquaculture", Class_Name))%>%
+  mutate(
+    crop_group = case_when(
+      grepl("Chickpea|Dry Beans|Peas|Vetch|Clover", Class_Name) ~ "Legumes",
+      grepl("Safflower|Flaxseed|Canola|Sunflower", Class_Name) ~ "Oil Crops",
+      grepl("Apple|Appricot|Avocado|Cantaloupe|Cherries|Citrus|Grapes|Nectarines|Peaches|Pears|Plums|Pomegranate|Olive|Watermelon|Melons", Class_Name) ~ "Fruits",
+      grepl("Almond|Walnut|Pecan|Pistachio", Class_Name) ~ "Nuts",
+      grepl("Broccoli|Cabbage|Carrot|Cucumber|Garlic|Lettuce|Pepper|Onion|Pumpkin|Squash|Tomato|Turnip|Greens|Herbs", Class_Name) ~ "Vegetables",
+      grepl("Barley|Corn|Wheat|Oats|Rice|Rye|Sorghum|Dbl Crop|Triticale", Class_Name) ~ "Grains"),
+    crop_group_broad = case_when(
+      crop_group %in% c("Legumes", "Grains") | Class_Name == "Alfalfa" ~ "Staple",
+      crop_group %in% c("Oil Crops, Fruits, Vegetables, Nuts") | grepl("Misc Vegs|Other Tree Crops|Sugarbeets", Class_Name) ~ "Cash Crop"))
+```
+
+```{r}
+# Extract land use values and area fractions for each parcel
+land_use_breakdown <- exact_extract(land_use_raster, parcels, include_area = TRUE, progress = TRUE)
+
+# Create an empty data frame to store the results
+results <- data.frame()
+
+# Loop through each parcel and process its land use data
+for (i in 1:length(land_use_breakdown)) {
+  # Get the parcel geometry and its corresponding land use breakdown
+  parcel_geom <- parcels[i, ]
+  parcel_land_use <- land_use_breakdown[[i]]
+  
+  # Calculate the total area of the parcel
+  total_area <- sum(parcel_land_use$area)
+  
+  # Create a data frame for each land use within the parcel
+  parcel_df <- parcel_land_use %>%
+    group_by(value) %>%  # 'value' is the land use category
+    summarize(crop_area = sum(area)) %>%  # Calculate the area for each crop
+    mutate(crop_percentage = crop_area / total_area,  # Calculate percentage of total area
+           parcel_id = parcel_geom$ID,  # Assuming the parcels have an 'ID' column
+           geometry = st_geometry(parcel_geom))  # Retain the geometry
+  
+  # Bind this data to the results dataframe
+  results <- bind_rows(results, parcel_df)
+}
+
+# Convert to an sf object with the parcel geometries if necessary
+results_sf <- st_as_sf(results)
+```
+
+
+
+### Which crops are most common for farms with most land/water access?
+
+```{r}
+hist(master_cropland_parcels$fraction_cropland)
+```
+
+### Crop-specific inequality trends/ginis
+
+For land, water, and land-water relationship
+
+Also by subbasin (since crop distribution might differ quite a bit by subbasin)
+
+```{r}
+
+```
+
+### Are bigger farms more likely to grow revenue-intensive or water-intensive crops?
+
+-   USDA crop price data & county-crop-specific yield (Landon has
+    dataset)
+-   Landon has another dataset of farm costs/budgetings by crop (or
+    could even be subsidies)
+
+```{r}
+
+```
+
+## Owner trends
+
+classify owners into groups (ex: LLCs like in Rempel et al) and assess
+size by group, crop behaviour by group, etc.
