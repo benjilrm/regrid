@@ -5,8 +5,14 @@ questions)](https://docs.google.com/document/d/1vTpxr06BUZmbJGiVwWKPF25CAjFsIY7g
 [Meetings con
 Paolo](https://docs.google.com/document/d/1MMMNPR3i4zqfXu89s6NPBws8MVdwPz0GxWhJaZTk59o/edit)
 
-# Load packages and set universal variables
+# Initial set up
 
+Set working directory
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "C:/Users/benji/Desktop/Regrid")
+```
+
+Load packages
 ```{r}
 library(sf)
 library(tidyverse)
@@ -19,23 +25,56 @@ library(tmap)
 library(tigris)
 ```
 
+Set universal variables
 ```{r}
 crs = 3310
 cropland_threshold = 0.1
 feet_to_metres = 0.3048
 ha_to_m2 = 10000
 
+tmap_mode("view")
+```
+
+# Import and process data
+
+## Central Valley counties
+
+Get polygons for central valley counties
+```{r, eval = F}
 central_valley_counties = str_to_lower(c("Butte", "Colusa", "Glenn", "Fresno", "Kern", "Kings", "Madera", "Merced", "Placer", "Sacramento", "San_Joaquin", "Shasta", "Stanislaus", "Sutter", "Tehama", "Tulare", "Yolo", "Yuba"))
 
 ca_counties = st_transform(counties(state = "CA", year = 2020, class = "sf"), crs)%>%
   filter(NAME %in% str_to_title(central_valley_counties) | NAME == "San Joaquin")
+
+st_write(ca_counties, "Data/Central Valley counties/central_valley_counties.gpkg")
 ```
 
-# Cropland parcels
+```{r}
+ca_counties = st_read("Data/Central Valley counties/central_valley_counties.gpkg")
+```
 
-## Data imports
 
-### Crop raster
+## GW basins
+
+Import spatial data for Bulletin 118 Groundwater Basin Boundaries (obtained from [CA DWR](https://water.ca.gov/programs/groundwater-management/bulletin-118))
+
+Filter for only gw basins intersecting with Central Valley counties
+
+```{r, eval = F}
+gw_basins = st_transform(st_read("Data/GW basins/Raw/i08_B118_v6_2.shp"), crs)%>%
+  dplyr::select(1:4)%>%
+  rename(basin_number = 1, subbasin_number = 2, basin_name = 3, subbasin_name = 4)%>%
+  filter(basin_name %in% c("SACRAMENTO VALLEY", "SAN JOAQUIN VALLEY"))
+
+st_write(gw_basins, "Data/GW basins/Filtered/filtered_gw_basins.gpkg")
+```
+
+```{r}
+gw_basins = st_read("Data/GW basins/Filtered/filtered_gw_basins.gpkg")
+```
+
+
+## Crop raster
 
 Crop raster from [2023 Cropland CROS (USDA)](https://croplandcros.scinet.usda.gov/). Import and reclassify to binary (cropland or not cropland)
 
@@ -49,27 +88,26 @@ cropland_extent_raster_binary = classify(cropland_extent_raster, reclass_matrix,
 writeRaster(cropland_extent_raster_binary, "Crop data/crops croplandcros/cropland_binary.tif")
 ```
 
-```{r}
-cropland_extent_raster_binary = rast("Crop data/crops croplandcros/cropland_binary.tif")
+```{r, eval = F}
+cropland_extent_raster_binary = rast("Data/Crop data/crops_3311.TIF")
 ```
 
-### Regrid land parcels
+## Cropland parcels
 
 Generate list of all Regrid Central Valley land parcel geopackages
 
-```{r}
-# List all GPKG files in the folder
-gpkg_files = list.files("Regrid parcel data/Raw/", pattern = "\\.gpkg$", full.names = TRUE)
+```{r, eval = F}
+gpkg_files = list.files("Regrid parcel data/Raw/", pattern = "\\.gpkg$", full.names = T)
 
 central_valley_gpkgs = Filter(function(file) any(sapply(central_valley_counties, function(county) grepl(county, file))), gpkg_files)
 ```
 
 Keep only relevant columns. Descriptions of Regrid column names [here](https://docs.google.com/spreadsheets/d/14RcBKyiEGa7q-SR0rFnDHVcovb9uegPJ3sfb3WlNPc0/edit#gid=942435131)
 
-```{r}
+```{r, eval = F}
 colnames(st_read("Regrid parcel data/Raw/ca_alpine.gpkg")%>%data.frame())
 
-columns <- c("parcelnumb", "parcelnumb_no_formatting", "alt_parcelnumb1", "alt_parcelnumb2", 
+columns = c("parcelnumb", "parcelnumb_no_formatting", "alt_parcelnumb1", "alt_parcelnumb2", 
              "alt_parcelnumb3", "usedesc", "parvaltype", "improvval", "landval", "parval", 
              "agval", "saleprice", "saledate", "owntype", "owner", "ownfrst", "ownlast", 
              "owner2", "owner3", "owner4", "mailadd", "mail_address2", "careof", 
@@ -80,16 +118,7 @@ columns <- c("parcelnumb", "parcelnumb_no_formatting", "alt_parcelnumb1", "alt_p
              "cdl_majority_percent", "cdl_date", "ll_gisacre")
 ```
 
-## Processing cropland parcels
-
-Go through the parcels geopackage for each Central Valley county, and
-for each parcel, calculate the fraction of the parcel that is cropland
-(based on our binary cropland raster above). Label parcels as "cropland
-parcels" if at least 10% of the parcel area is designated as cropland.
-This is to avoid designating parcels as cropland parcels in cases where
-a tiny portion is cropland or a few grid cells are mistakenly classified
-as cropland in the Cropland CROS raster. Combine cropland parcels from
-all Central Valley counties into one large dataset of cropland parcels.
+Go through the parcels geopackage for each Central Valley county, filtering for only parcels intersecting the gw basins of interest. For each parcel, calculate the fraction of the parcel that is cropland (based on our binary cropland raster above). Label parcels as "cropland parcels" if at least 10% of the parcel area is designated as cropland. This is to avoid designating parcels as cropland parcels in cases where a tiny portion is cropland or a few grid cells are mistakenly classified as cropland in the Cropland CROS raster. Combine cropland parcels from all Central Valley counties into one large dataset of cropland parcels.
 
 ```{r, eval = F}
 start_time = Sys.time()
@@ -98,8 +127,9 @@ master_cropland_parcels = lapply(central_valley_gpkgs, function(file) {
   county_name = str_to_title(gsub("_", " ", gsub("ca_|\\.gpkg", "", basename(file))))
   cat(county_name, "County\n")
 
-  return(st_transform(st_read(file, quiet = TRUE), crs) %>%
+  return(st_transform(st_read(file, quiet = T), crs) %>%
     dplyr::select(all_of(columns))%>%
+    st_filter(., gw_basins, .pred = st_intersects)%>%
     mutate(fraction_cropland = exact_extract(cropland_extent_raster_binary, ., 'mean'), 
          parcel_area_ha = ll_gisacre * 0.404686, 
          cropland_parcel = ifelse(fraction_cropland > cropland_threshold, 1, 0))%>%
@@ -112,109 +142,86 @@ master_cropland_parcels = do.call(rbind, master_cropland_parcels)
 end_time = Sys.time()
 end_time - start_time
 
-st_write(master_cropland_parcels, "Regrid parcel data/Processed/central_valley_cropland_parcels_june6.gpkg")
+st_write(master_cropland_parcels, "Data/Parcels/Cropland parcels/cropland_parcels.gpkg", delete_dsn = T)
 ```
 
-# Compiling well and section data
+```{r}
+master_cropland_parcels = st_read("Data/Parcels/Cropland parcels/cropland_parcels.gpkg")
+```
 
-## Importing and initial processing
+## Sections
 
-### Well data
+Import sections (1x1 mile squares) from [California Data Portal](https://data.ca.gov/dataset/public-land-survey-system-plss-sections).
+This is because most of the wells are not precisely geolocated, but rather snapped to the centroid of the section that they fall within.
+
+Filter for sections that intersect at least 1 cropland parcel and intersect the GW basins of interest
+```{r, eval = F}
+sections = st_transform(st_read("Data/Sections/Raw data/Public_Land_Survey_System_(PLSS)_3A_Sections.shp"), crs)%>%
+  st_filter(., master_cropland_parcels, .pred = st_intersects)%>%
+  st_filter(., gw_basins, .pred = st_intersects)%>%
+  dplyr::select(MTRS, geometry)
+```
+
+## Well data
 
 Import well data from the [USGWD](https://www.hydroshare.org/resource/8b02895f02c14dd1a749bcc5584a5c55/) dataset and from the [OSWCR](https://data.ca.gov/dataset/well-completion-reports) dataset (maintained by the CA Dept of Water Resources).
 
 Import well data and get rid of duplicates (based on CA well ID).
 
-```{r}
-wells = read.csv("GW well data/USGWD_California.csv")%>%
+```{r, eval = F}
+usgwd = read.csv("Data/Wells/Raw/Chung-Yi's dataset/USGWD_California.csv")%>%
   arrange(rowSums(is.na(.)))%>%
-  distinct(Well.ID..State., .keep_all = TRUE)%>%
+  distinct(Well.ID..State., .keep_all = T)%>%
   rename(ca_well_id = 2)
 ```
 
 Bring in OSWCR dataset for additional important covariates that are not in USGWD, such as well address details, accuracy of geolocation, etc.
 
-```{r}
-oswcr = read.csv("GW well data/wellcompletionreports.csv")%>%
+```{r, eval = F}
+oswcr = read.csv("Data/Wells/Raw/OSWCR/wellcompletionreports.csv")%>%
   dplyr::select(1, LLACCURACY, METHODOFDETERMINATIONLL, WELLLOCATION, CITY, PLANNEDUSEFORMERUSE, APN)%>%
   rename(ca_well_id = 1, geo_accuracy = 2, method_of_determination = 3, well_address = 4, city = 5, use_oswcr = 6)
 ```
 
 Combine the 2 well datasets and turn into spatial point data
 
-```{r}
-wells_sf = st_transform(st_as_sf(left_join(wells, oswcr, by = "ca_well_id")%>%
+Clean up the IDs, addresses, and such (ex: turn addresses to lowercase so capitalisation won't trip up any of the well-parcel matching)
+
+```{r, eval = F}
+filtered_wells = st_transform(st_as_sf(left_join(usgwd, oswcr, by = "ca_well_id")%>%
                                    filter(!is.na(Longitude) & !is.na(Latitude)), 
-                                 coords = c("Longitude", "Latitude"), crs = 4326), crs)
+                                 coords = c("Longitude", "Latitude"), crs = 4326), crs)%>%
+  filter(grepl("Irrigation|Unknown", USGS.Water.Use.Category))%>%
+  mutate_at(vars(well_address, city), ~ na_if(., ""))%>%
+  separate(well_address, into = c("address_no", "address_st"), sep = " ", extra = "merge", convert = T, remove = F)%>%
+  st_join(., sections)%>%
+  filter(!is.na(MTRS))%>%
+  mutate(APN = gsub("[- ]", "", APN),
+         well_address = str_to_lower(well_address),
+         address_st = str_to_lower(address_st))
 
 rm(oswcr, wells)
+
+st_write(wells_sf_filtered, "Data/Wells/Processed/filtered_wells_with_section.gpkg", delete_dsn = T)
+```
+```{r}
+filtered_wells = st_read("Data/Wells/Processed/filtered_wells_with_section.gpkg")
 ```
 
-### GW basins
 
-Import GW basin spatial data (obtained from [CA DWR](https://water.ca.gov/programs/groundwater-management/bulletin-118))
+We want to make one last update to our sections dataset: Before, we filtered for sections intersecting cropland parcels and groundwater basins of interest. Now, we want to narrow down further to those sections that also have a well in them. This will be our final 'filtered sections' dataset.
 
-```{r}
-gw_basins = st_transform(st_read("Bulletin 118 Groundwater Basin Boundaries/Bulletin 118 Groundwater Basin Boundary GIS Data - v6_2/Shapefile/Shapefile/i08_B118_v6_2.shp"), crs)%>%
-  dplyr::select(1:4)%>%
-  rename(basin_number = 1, subbasin_number = 2, basin_name = 3, subbasin_name = 4)%>%
-  st_filter(., ca_counties, .pred = st_intersects)
-```
-
-### Sections
-
-Import sections (1x1 mile squares) from [California Data Portal](https://data.ca.gov/dataset/public-land-survey-system-plss-sections).
-This is because most of the wells are not precisely geolocated, but rather snapped to the centroid of the section that they fall within.
-
-```{r}
-sections = st_transform(st_read("C:/Users/benji/OneDrive/Desktop/Regrid project/PLSS Sections/Public_Land_Survey_System_(PLSS)%3A_Sections.shp"), crs)
-```
-
-## Combining datasets
-
-### Relevant sections
-
-Filter for sections that intersect at least 1 cropland parcel and intersect a GW basin.
-
-```{r}
-sections_with_cropland_parcels_and_gw_basins = sections%>%
-  st_filter(., master_cropland_parcels, .pred = st_intersects)%>%
-  st_filter(., gw_basins, .pred = st_intersects)%>%
-  dplyr::select(MTRS, geometry)
-
-rm(sections)
-```
-
-### Wells in relevant sections
-
-Filter for wells that are in sections that intersect with cropland parcels in GW basins. Also for wells with use denoted irrigation or unknown. Process well address to facilitate future matches between wells and parcels based on address.
-
-```{r}
-filtered_wells = st_join(wells_sf, sections_with_cropland_parcels_and_gw_basins)%>%
-  filter(grepl("Irrigation|Unknown", USGS.Water.Use.Category) & !is.na(MTRS))%>%
-  mutate_at(vars(well_address, city), ~ na_if(., ""))%>%
-  separate(well_address, into = c("address_no", "address_st"), sep = " ", extra = "merge", convert = T, remove = F)
-
-rm(wells_sf)
-
-st_write(filtered_wells, "GW well data/wells_filtered_june6.gpkg")
-```
-
-### Relevant sections with wells in them
-
-Before, we filtered for sections intersecting cropland parcels and groundwater basins. Now, we want to narrow down to sections intersecting cropland parcels specifically that have a well in them. This will be our final 'filtered sections' dataset.
-
-```{r}
-filtered_sections = sections_with_cropland_parcels_and_gw_basins%>%
+```{r, eval = F}
+filtered_sections = sections%>%
   filter(MTRS %in% filtered_wells$MTRS)
 
-rm(sections_with_cropland_parcels_and_gw_basins)
-rm(filtered_wells, gw_basins, master_cropland_parcels)
+rm(sections)
 
-st_write(filtered_sections, "PLSS Sections/filtered_sections_june6.gpkg")
+st_write(filtered_sections, "Data/Sections/Filtered/filtered_sections.gpkg", delete_dsn = T)
 ```
-
-### Well buffer
+```{r}
+filtered_sections = st_read("Data/Sections/Filtered/filtered_sections.gpkg")
+```
 
 Not all wells are snapped to the centroid of the section they fall in. Based on the 'geo_accuracy' column, we can pull out the wells with accuracy of coordinates 50ft or less and put a buffer around them for the later matching steps. For example, for a well with accuracy 2.5ft, we can only consider matching that well to parcels within a 2.5ft buffer around that well.
 
@@ -222,21 +229,23 @@ Not all wells are snapped to the centroid of the section they fall in. Based on 
 distances_less_than_50_ft = c("0.1 Ft", "10 Ft", "2.5 Ft", "20 Ft", "5 Ft", "50 Ft")
 
 well_buffer = filtered_wells%>%
-  mutate(buffer_distance = as.numeric(gsub("\\s*\\w*$", "", ifelse(geo_accuracy %in% distances_less_than_50_ft, geo_accuracy, NA)))*feet_to_metres)%>%
-  filter(!is.na(buffer_distance))%>%
+  filter(geo_accuracy %in% distances_less_than_50_ft)%>%
+  mutate(buffer_distance = as.numeric(gsub("\\s*\\w*$", "", geo_accuracy))*feet_to_metres)%>%
   mutate(geom = st_buffer(geom, dist = buffer_distance))%>%
   dplyr::select(ca_well_id, MTRS, geom)%>%
-  rename(MTRS_well = MTRS)
+  rename(well_MTRS = MTRS)
+
+st_write(well_buffer, "Data/Wells/Processed/well_buffer.gpkg", delete_dsn = T)
 ```
 
-# Filtered parcels
+## Filtered parcels
 
 Our master cropland parcels dataset will be great for analysis just concerning land (ex: relationship between precipitation and farm size).
 However, for land-water analysis, some of the wells could be matched to non-cropland parcels. We'll ultimately want to exclude these wells/parcels, but we don't want to mistakenly match a well with a cropland parcel when its 'true' match was with a non-cropland parcel. Therefore, for future matching steps, we want to get a dataset of all parcels (cropland and non-cropland) that intersect any sections with wells in them (aka, our final 'filtered sections' dataset).
 
-## Iterate through counties and parcels
-
 Here, similar to the cropland parcel iteration above, we go through each county. We filter for parcels that intersect with our 'filtered_sections' dataset and designate parcels as cropland parcels or not. We do some processing on parcel addresses to help with our matches by address later on. Finally, we combine the filtered parcels from all Central Valley counties into one dataset!
+
+We also want to make sure that each parcel has a unique ID, since the parcel IDs in the Regrid dataset can be duplicated in some cases.
 
 ```{r, eval = F}
 start_time = Sys.time()
@@ -255,48 +264,29 @@ filtered_parcels = lapply(central_valley_gpkgs, function(file) {
     separate(address, into = c("address_no", "address_st"), sep = " ", extra = "merge", convert = T, remove = F)%>%
     rename(parcel_id = parcelnumb))})
 
-filtered_parcels = do.call(rbind, filtered_parcels)
+filtered_parcels = do.call(rbind, filtered_parcels)%>%
+  mutate(my_parcel_num = row_number())
 
 end_time = Sys.time()
 end_time - start_time
 
-st_write(filtered_parcels, "Regrid parcel data/Processed/central_valley_filtered_parcels_june6.gpkg")
+st_write(filtered_parcels, "Data/Parcels/Filtered parcels/filtered_parcels.gpkg", delete_dsn = T)
 ```
 
-## Join parcels with section
-
-Create a unique ID (my_parcel_num) for each parcel, since the parcel IDs can be duplicated in some cases. Spatially join these filtered parcels with the section they intersect. If a parcel intersects 2 sections, this will create a duplicate row for that parcel (ie: the parcel will have two rows, one for each section it intersects). We want this because we want to consider all possible sections a parcel could intersect rather than just the one it has most overlap with.
-
 ```{r}
-filtered_parcels = st_read("Regrid parcel data/Processed/central_valley_filtered_parcels_june6.gpkg")%>%
-  mutate(my_parcel_num = row_number())
-
-filtered_parcels_with_section = st_join(filtered_parcels, filtered_sections)
-
-st_write(filtered_parcels_with_section, "Regrid parcel data/Processed/filtered_parcels_with_section_june11.gpkg")
+filtered_parcels = st_read("Data/Parcels/Filtered parcels/filtered_parcels.gpkg")
 ```
 
-## Well buffer
 
-Using spatial join, create a dataset of parcels that intersect with the designated buffer of any of the wells that had a geolocation geoaccuracy 50ft or less (which are make up the 'well_buffer' dataset). In cases where there are multiple rows for a given parcel, only keep the row where the section code (MTRS) matches that of the well whose buffer the parcel intersects.
+Now, let's run a spatial join of these filtered parcels with the section they intersect. 
 
-```{r}
-well_buffer_parcels = st_filter(filtered_parcels_with_section, well_buffer%>%select(ca_well_id, MTRS_well), .pred = st_intersects)%>%
-  st_join(., well_buffer)%>%
-  data.frame()%>%
-  filter(MTRS == MTRS_well)
-st_write(well_buffer_parcels, "Regrid parcel data/Processed/well_buffer_parcels_june11.gpkg")
-```
+If a parcel intersects 2 sections, this will create a duplicate row for that parcel (ie: the parcel will have two rows, one for each section it intersects). We want this because we want to consider all possible sections a parcel could intersect rather than just the one it has most overlap with.
 
-# Matching wells with parcels
+Also, we want to clean up the IDs, addresses, and such (ex: turn addresses to lowercase so capitalisation won't trip up any of the well-parcel matching)
 
-## Prepare datasets
-
-Clean up the IDs, addresses, and such for wells and land parcels (ex: turn addresses to lowercase so capitalisation won't trip up any of the well-parcel matching)
-
-```{r}
-filtered_parcels_with_section = st_read("Regrid parcel data/Processed/filtered_parcels_with_section_june11.gpkg")%>%
-  data.frame()%>%
+```{r, eval = F}
+filtered_parcels_with_section = filtered_parcels%>%
+  st_join(., filtered_sections)%>%
   mutate(parcel_id = gsub("[- ]", "", parcel_id), 
          parcelnumb_no_formatting = gsub("[- ]", "", parcelnumb_no_formatting),
          address = str_to_lower(address),
@@ -304,24 +294,39 @@ filtered_parcels_with_section = st_read("Regrid parcel data/Processed/filtered_p
          address_st = str_to_lower(address_st),
          owner = str_to_lower(owner))
 
-filtered_wells = st_read("GW well data/wells_filtered_june6.gpkg")%>%
-  data.frame()%>%
-  mutate(APN = gsub("[- ]", "", APN),
-         well_address = str_to_lower(well_address),
-         address_st = str_to_lower(address_st))
+st_write(filtered_parcels_with_section, "Data/Parcels/Filtered parcels/filtered_parcels_with_sections.gpkg", delete_dsn = T)
+```
 
-well_buffer_parcels = st_read("Regrid parcel data/Processed/well_buffer_parcels_june11.gpkg")
+```{r}
+filtered_parcels_with_section = st_read("Data/Parcels/Filtered parcels/filtered_parcels_with_sections.gpkg")
+```
+
+
+Now, using a spatial join, let's create a dataset of parcels that intersect with the designated buffer of any of the wells that had a geolocation geoaccuracy 50ft or less (which are make up the 'well_buffer' dataset). In cases where there are multiple rows for a given parcel, only keep the row where the section code (MTRS) matches that of the well whose buffer the parcel intersects.
+
+```{r, eval = F}
+well_buffer_parcels = st_filter(filtered_parcels_with_section, well_buffer%>%select(ca_well_id, MTRS_well), .pred = st_intersects)%>%
+  st_join(., well_buffer)%>%
+  data.frame()%>%
+  filter(MTRS == MTRS_well)
+
+st_write(well_buffer_parcels, "Data/Parcels/Filtered parcels/parcels_intersecting_well_buffer.gpkg", delete_dsn = T)
+```
+
+```{r}
+well_buffer_parcels = st_read("Data/Parcels/Filtered parcels/parcels_intersecting_well_buffer.gpkg")
 well_buffer_parcels_ids = unique(well_buffer_parcels$ca_well_id)
 ```
 
-## Run matching loop
 
-Create an empty dataframe for each well and the section it falls in that
-we will populate with the parcel number it gets matched with (if any)
-and the matching method.
+# Matching wells with parcels
 
-```{r}
-matches = data.frame(my_parcel_num = NA, ca_well_id = filtered_wells$ca_well_id, string_dist = NA, match_method = NA, section = filtered_wells$MTRS)%>%
+## Matching loop
+
+Create an empty dataframe for each well and the section it falls in that we will populate with the parcel number it gets matched with (if any) and the matching method.
+
+```{r, eval = F}
+loop_matches = data.frame(my_parcel_num = NA, ca_well_id = filtered_wells$ca_well_id, string_dist = NA, match_method = NA, section = filtered_wells$MTRS)%>%
   mutate(row_id = row_number())
 
 duplicate_parcels_list = list()
@@ -329,9 +334,14 @@ duplicate_parcels_list = list()
 
 Loop through each well in our filtered well dataset. For each well, generate a dataframe of all the parcels that intersect with that well's section or the buffer around that well if applicable.
 
-Then, for each well, we go through our hierarchy for matching methods. First priority is if the well's section or buffer only has one parcel in it (which makes it easy for us!). Second is if the APN (Assessor Parcel Numbers) of the well and parcel address perfectly match. Third is if well address is a perfect match with a parcel in that section's address or mailing address. Fourth is if the number in the well and parcel address number is the exact same and the street name is very similar (less than 0.3 based on Jaro-Winkler string distance)
+Then, for each well, we go through our hierarchy for matching methods:
+1. First priority is if the well's section or buffer only has one parcel in it (which makes it easy for us!).
+2. Second is if the APN (Assessor Parcel Numbers) of the well and parcel address perfectly match.
+3. Third is if well address is a perfect match with a parcel in that section's address or mailing address.
+4. Fourth is if the number in the well and parcel address number is the exact same and the street name is very similar (less than 0.3 based on Jaro-Winkler string distance)
 
-```{r}
+Export our completed match dataset
+```{r, eval = F}
 for (i in 20739:nrow(filtered_wells)) {
   
   well = filtered_wells[i, ]
@@ -348,8 +358,8 @@ for (i in 20739:nrow(filtered_wells)) {
   else{intersecting_parcels_route1 = intersecting_parcels}
   
   if (nrow(intersecting_parcels_route1) == 1) {
-    matches$my_parcel_num[i] = intersecting_parcels_route1$my_parcel_num
-    matches$match_method[i] = if (well$ca_well_id %in% well_buffer_parcels_ids) "1 parcel in well buffer" else "1 parcel in section"
+    loop_matches$my_parcel_num[i] = intersecting_parcels_route1$my_parcel_num
+    loop_matches$match_method[i] = if (well$ca_well_id %in% well_buffer_parcels_ids) "1 parcel in well buffer" else "1 parcel in section"
     next} 
   
   #Route 2: APN match
@@ -357,8 +367,8 @@ for (i in 20739:nrow(filtered_wells)) {
     apn_match = intersecting_parcels$parcel_id == well$APN | intersecting_parcels$parcelnumb_no_formatting == well$APN | intersecting_parcels$parcelnumb_no_formatting == sub("000$", "", well$APN)
   apn_match[is.na(apn_match)] = FALSE
     if (any(apn_match, na.rm = T)) {
-      matches$my_parcel_num[i] = intersecting_parcels$my_parcel_num[apn_match][1]
-      matches$match_method[i] = "APN match"
+      loop_matches$my_parcel_num[i] = intersecting_parcels$my_parcel_num[apn_match][1]
+      loop_matches$match_method[i] = "APN match"
       
       if (length(intersecting_parcels$my_parcel_num[apn_match]) > 1) {
         for (parcel_id in intersecting_parcels$my_parcel_num[apn_match]) {
@@ -369,8 +379,8 @@ for (i in 20739:nrow(filtered_wells)) {
   address_match <- intersecting_parcels$address == well$well_address | intersecting_parcels$mailadd == well$well_address
   address_match[is.na(address_match)] = F
   if (any(address_match, na.rm = T)) {
-    matches$my_parcel_num[i] <- intersecting_parcels$my_parcel_num[address_match][1]
-    matches$match_method[i] <- "Perfect address match"
+    loop_matches$my_parcel_num[i] <- intersecting_parcels$my_parcel_num[address_match][1]
+    loop_matches$match_method[i] <- "Perfect address match"
     
     if (length(intersecting_parcels$my_parcel_num[address_match]) > 1) {
         for (parcel_id in intersecting_parcels$my_parcel_num[address_match]) {
@@ -389,18 +399,20 @@ for (i in 20739:nrow(filtered_wells)) {
       min_dist = which.min(distances)
   
       if (distances[min_dist] < 0.3) {
-        matches$my_parcel_num[i] <- intersecting_parcels$my_parcel_num[address_number_match][min_dist]
-        matches$match_method[i] <- "String distance match"
-        matches$string_dist[i] <- distances[min_dist]
+        loop_matches$my_parcel_num[i] <- intersecting_parcels$my_parcel_num[address_number_match][min_dist]
+        loop_matches$match_method[i] <- "String distance match"
+        loop_matches$string_dist[i] <- distances[min_dist]
         next}}}}
+
+write.csv(loop_matches, "Data/Well-parcel matches/full_loop_matches.csv", row.names = F)
 ```
 
-Export our completed match dataset
 ```{r}
-write.csv(matches, "Matches/matches_full.csv", row.names = F)
+loop_matches = read.csv("Well-parcel matches/full_loop_matches.csv")
 ```
 
-Diagnostics
+
+Let's run some quick diagnostics
 
 ```{r}
 table(matches%>%filter(!is.na(my_parcel_num))%>%
@@ -415,31 +427,31 @@ matches%>%filter(!is.na(my_parcel_num))%>%
 
 ## Geocoding
 
-Prepare and export unmatched wells to geocode as excel file to read into ArcGIS for geocoding. Filter out any wells whose addresses are ungeocodable (ex: any part of the address is NA)
+The fifth and final method we'll used to match wells and parcels is geocoding well addresses. 
 
-```{r}
-matches = read.csv("Matches/matches_full.csv")
+Prepare and export any remaining unmatched wells as an excel file to read into ArcGIS for geocoding. Filter out any wells whose addresses are ungeocodable (ex: any part of the address is NA)
 
-matches
-
+```{r, eval = F}
 wells_to_geocode = filtered_wells%>%
-  filter(ca_well_id %in% (matches%>%filter(is.na(my_parcel_num))%>%pull(ca_well_id)) & !is.na(well_address) & address_no != 0 & grepl("^[0-9]+$", address_no) & !is.na(city))%>%
+  filter(ca_well_id %in% (loop_matches%>%filter(is.na(my_parcel_num))%>%pull(ca_well_id)) & !is.na(well_address) & address_no != 0 & grepl("^[0-9]+$", address_no) & !is.na(city))%>%
   mutate(state = "CA")
 
-write.xlsx(wells_to_geocode%>%select(ca_well_id, well_address, city, state), 'wells_to_geocode.xlsx', row.names = FALSE)
+write.xlsx(wells_to_geocode%>%select(ca_well_id, well_address, city, state), 'Well-parcel matches/Geocoding/wells_to_geocode.xlsx', row.names = FALSE)
 ```
 
 Conducted the geocoding in ArcGIS Pro, yielding a point shapefile. We can now import this shapefile back into R and only keep wells that got filtered
-to an actual address (rather than an intersection, POI, etc., which would mess up our spatial join with parcels). Spatially join geocoded wells to parcels.
+to an actual address (rather than an intersection, POI, etc., which would mess up our spatial join with parcels). 
 
-```{r}
-#pull geocoded wells back in from arcgis geocoding service and filter for actual addresses
-geocoded_wells = st_transform(st_read("geocoded_wells.shp"), crs = crs)%>%
+
+```{r, eval = F}
+geocoded_wells = st_transform(st_read("Data/Well-parcel matches/Geocoding/Geocoded wells/geocoded_wells.shp"), crs = crs)%>%
   filter(!is.na(Addr_type) & !Addr_type %in% c("StreetName", "StreetMidBlock", "Locality", "StreetInt", "POI") & Score > 90)%>%
   select(USER_ca_we)%>%
   rename(ca_well_id = 1)
+```
 
-#spatial join geocoded points to parcels
+Spatially join geocoded wells to the respective parcels they fall in
+```{r, eval = F}
 geocoded_wells_joined = geocoded_wells%>%
   st_join(., filtered_parcels%>%select(my_parcel_num), join = st_within)%>%
   filter(!is.na(my_parcel_num))%>%
@@ -451,16 +463,21 @@ geocoded_wells_joined = geocoded_wells%>%
 
 Join matches with geocoded matches. For any wells that didn't get matched but had a geocode match, use geocoded parcel number, otherwise keep original match.
 
-```{r}
-final_matches = matches%>%
+```{r, eval = F}
+final_matches = loop_matches%>%
   left_join(., geocoded_wells_joined, by = "ca_well_id") %>%
   mutate(
     match_method = ifelse(is.na(my_parcel_num) & !is.na(my_parcel_num_geocoded), "Geocoded", match_method),
     my_parcel_num = ifelse(is.na(my_parcel_num), my_parcel_num_geocoded, my_parcel_num))%>%
   filter(!is.na(my_parcel_num))
 
-write.csv(final_matches, "Matches/final_matches_with_geocoding_august2.csv", row.names = F)
+write.csv(final_matches, "Data/Well-parcel matches/Geocoding/all_matches.csv", row.names = F)
 ```
+
+```{r}
+final_matches = read.csv("Data/Well-parcel matches/Geocoding/all_matches.csv")
+```
+
 
 # Final processing
 
@@ -475,7 +492,6 @@ filtered_parcels_with_basin = filtered_parcels%>%
   filter(my_parcel_num %in% final_matches$my_parcel_num)%>%
   st_join(., gw_basins, join = st_intersects, largest = T)%>%
   st_join(., filtered_sections%>%select(MTRS)%>%rename(parcel_MTRS = 1), join = st_intersects, largest = T)%>%
-  data.frame()%>%
   select(usedesc:agval, owner:owner4, cdl_majority_category:cdl_majority_percent, fraction_cropland:my_parcel_num, basin_name:parcel_MTRS)
 ```
 
