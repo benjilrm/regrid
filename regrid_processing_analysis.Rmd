@@ -89,7 +89,7 @@ writeRaster(cropland_extent_raster_binary, "Crop data/crops croplandcros/croplan
 ```
 
 ```{r, eval = F}
-cropland_extent_raster_binary = rast("Data/Crop data/crops_3311.TIF")
+cropland_extent_raster_binary = rast("Data/Crop data/cropland_binary.tif")
 ```
 
 ## Cropland parcels
@@ -97,15 +97,15 @@ cropland_extent_raster_binary = rast("Data/Crop data/crops_3311.TIF")
 Generate list of all Regrid Central Valley land parcel geopackages
 
 ```{r, eval = F}
-gpkg_files = list.files("Regrid parcel data/Raw/", pattern = "\\.gpkg$", full.names = T)
+gpkg_files = list.files("Data/Parcels/Raw/", pattern = "\\.gpkg$", full.names = T)
 
 central_valley_gpkgs = Filter(function(file) any(sapply(central_valley_counties, function(county) grepl(county, file))), gpkg_files)
 ```
 
 Keep only relevant columns. Descriptions of Regrid column names [here](https://docs.google.com/spreadsheets/d/14RcBKyiEGa7q-SR0rFnDHVcovb9uegPJ3sfb3WlNPc0/edit#gid=942435131)
 
-```{r, eval = F}
-colnames(st_read("Regrid parcel data/Raw/ca_alpine.gpkg")%>%data.frame())
+```{r}
+#colnames(st_read("Data/Parcels/Raw/ca_yuba.gpkg")%>%data.frame())
 
 columns = c("parcelnumb", "parcelnumb_no_formatting", "alt_parcelnumb1", "alt_parcelnumb2", 
              "alt_parcelnumb3", "usedesc", "parvaltype", "improvval", "landval", "parval", 
@@ -133,17 +133,18 @@ master_cropland_parcels = lapply(central_valley_gpkgs, function(file) {
     mutate(fraction_cropland = exact_extract(cropland_extent_raster_binary, ., 'mean'), 
          parcel_area_ha = ll_gisacre * 0.404686, 
          cropland_parcel = ifelse(fraction_cropland > cropland_threshold, 1, 0))%>%
-    filter(cropland_parcel == 1)%>%
-    separate(address, into = c("address_no", "address_st"), sep = " ", extra = "merge", convert = T, remove = F)%>%
-    rename(parcel_id = parcelnumb))})
+    filter(cropland_parcel == 1))})
 
-master_cropland_parcels = do.call(rbind, master_cropland_parcels)
+master_cropland_parcels = do.call(rbind, master_cropland_parcels)%>%
+  separate(address, into = c("address_no", "address_st"), sep = " ", extra = "merge", convert = T, remove = F)%>%
+  rename(parcel_id = parcelnumb)
 
 end_time = Sys.time()
 end_time - start_time
 
 st_write(master_cropland_parcels, "Data/Parcels/Cropland parcels/cropland_parcels.gpkg", delete_dsn = T)
 ```
+
 
 ```{r}
 master_cropland_parcels = st_read("Data/Parcels/Cropland parcels/cropland_parcels.gpkg")
@@ -202,7 +203,7 @@ filtered_wells = st_transform(st_as_sf(left_join(usgwd, oswcr, by = "ca_well_id"
 
 rm(oswcr, wells)
 
-st_write(wells_sf_filtered, "Data/Wells/Processed/filtered_wells_with_section.gpkg", delete_dsn = T)
+st_write(filtered_wells, "Data/Wells/Processed/filtered_wells_with_section.gpkg", delete_dsn = T)
 ```
 ```{r}
 filtered_wells = st_read("Data/Wells/Processed/filtered_wells_with_section.gpkg")
@@ -231,8 +232,8 @@ distances_less_than_50_ft = c("0.1 Ft", "10 Ft", "2.5 Ft", "20 Ft", "5 Ft", "50 
 well_buffer = filtered_wells%>%
   filter(geo_accuracy %in% distances_less_than_50_ft)%>%
   mutate(buffer_distance = as.numeric(gsub("\\s*\\w*$", "", geo_accuracy))*feet_to_metres)%>%
-  mutate(geom = st_buffer(geom, dist = buffer_distance))%>%
-  dplyr::select(ca_well_id, MTRS, geom)%>%
+  mutate(geometry = st_buffer(geometry, dist = buffer_distance))%>%
+  dplyr::select(ca_well_id, MTRS, geometry)%>%
   rename(well_MTRS = MTRS)
 
 st_write(well_buffer, "Data/Wells/Processed/well_buffer.gpkg", delete_dsn = T)
@@ -250,12 +251,11 @@ We also want to make sure that each parcel has a unique ID, since the parcel IDs
 ```{r, eval = F}
 start_time = Sys.time()
 
-# Read all files and combine them into a single data frame
 filtered_parcels = lapply(central_valley_gpkgs, function(file) {
   county_name = str_to_title(gsub("_", " ", gsub("ca_|\\.gpkg", "", basename(file))))
   cat(county_name, "County\n")
 
-  return(st_transform(st_read(file, quiet = TRUE), crs) %>%
+  return(st_transform(st_read(file, quiet = T), crs) %>%
     dplyr::select(all_of(columns))%>%
     st_filter(., filtered_sections, .pred = st_intersects)%>%
     mutate(fraction_cropland = exact_extract(cropland_extent_raster_binary, ., 'mean'), 
@@ -305,10 +305,10 @@ filtered_parcels_with_section = st_read("Data/Parcels/Filtered parcels/filtered_
 Now, using a spatial join, let's create a dataset of parcels that intersect with the designated buffer of any of the wells that had a geolocation geoaccuracy 50ft or less (which are make up the 'well_buffer' dataset). In cases where there are multiple rows for a given parcel, only keep the row where the section code (MTRS) matches that of the well whose buffer the parcel intersects.
 
 ```{r, eval = F}
-well_buffer_parcels = st_filter(filtered_parcels_with_section, well_buffer%>%select(ca_well_id, MTRS_well), .pred = st_intersects)%>%
+well_buffer_parcels = st_filter(filtered_parcels_with_section, well_buffer%>%select(ca_well_id, well_MTRS), .pred = st_intersects)%>%
   st_join(., well_buffer)%>%
   data.frame()%>%
-  filter(MTRS == MTRS_well)
+  filter(MTRS == well_MTRS)
 
 st_write(well_buffer_parcels, "Data/Parcels/Filtered parcels/parcels_intersecting_well_buffer.gpkg", delete_dsn = T)
 ```
@@ -342,7 +342,7 @@ Then, for each well, we go through our hierarchy for matching methods:
 
 Export our completed match dataset
 ```{r, eval = F}
-for (i in 20739:nrow(filtered_wells)) {
+for (i in 1:nrow(filtered_wells)) {
   
   well = filtered_wells[i, ]
   
@@ -415,12 +415,12 @@ loop_matches = read.csv("Well-parcel matches/full_loop_matches.csv")
 Let's run some quick diagnostics
 
 ```{r}
-table(matches%>%filter(!is.na(my_parcel_num))%>%
+table(loop_matches%>%filter(!is.na(my_parcel_num))%>%
   left_join(., filtered_wells%>%select(ca_well_id, APN), by = "ca_well_id")%>%
   left_join(., filtered_parcels_with_section%>%select(my_parcel_num, parcel_id, parcelnumb_no_formatting, MTRS), by = c("my_parcel_num" = "my_parcel_num", "section" = "MTRS"))%>%
   pull(match_method))
 
-matches%>%filter(!is.na(my_parcel_num))%>%
+loop_matches%>%filter(!is.na(my_parcel_num))%>%
   left_join(., filtered_wells%>%select(ca_well_id, APN), by = "ca_well_id")%>%
   left_join(., filtered_parcels_with_section%>%select(my_parcel_num, parcel_id, parcelnumb_no_formatting, MTRS), by = c("my_parcel_num" = "my_parcel_num", "section" = "MTRS"))
 ```
@@ -448,6 +448,8 @@ geocoded_wells = st_transform(st_read("Data/Well-parcel matches/Geocoding/Geocod
   filter(!is.na(Addr_type) & !Addr_type %in% c("StreetName", "StreetMidBlock", "Locality", "StreetInt", "POI") & Score > 90)%>%
   select(USER_ca_we)%>%
   rename(ca_well_id = 1)
+
+st_read("Data/Well-parcel matches/Geocoding/Geocoded wells/geocoded_wells.shp")%>%data.frame()
 ```
 
 Spatially join geocoded wells to the respective parcels they fall in
