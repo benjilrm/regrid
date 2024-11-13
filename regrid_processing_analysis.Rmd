@@ -45,6 +45,12 @@ ca_counties = st_transform(counties(state = "CA", year = 2020, class = "sf"), cr
 st_write(ca_counties, "Data/Central Valley counties/central_valley_counties.gpkg")
 ```
 
+## Precipitation
+```{r}
+precip = rast("Data/Precipitation/chirps-v2.0.annual.nc")
+```
+
+
 ## GW basins
 
 Import spatial data for Bulletin 118 Groundwater Basin Boundaries (obtained from [CA DWR](https://water.ca.gov/programs/groundwater-management/bulletin-118))
@@ -57,7 +63,16 @@ gw_basins = st_transform(st_read("Data/GW basins/Raw/i08_B118_v6_2.shp"), crs)%>
   rename(basin_number = 1, subbasin_number = 2, basin_name = 3, subbasin_name = 4)%>%
   filter(basin_name %in% c("SACRAMENTO VALLEY", "SAN JOAQUIN VALLEY"))
 
-st_write(gw_basins, "Data/GW basins/Filtered/filtered_gw_basins.gpkg")
+subbasin_precip_means <- exact_extract(crop(precip, ext(gw_basins)), gw_basins, 'mean', force_df = TRUE)%>%
+  rename_with(~ as.character(1981:2023))%>%
+  mutate(mean_annual_precip = rowMeans(across(everything())))%>%
+  pull(mean_annual_precip)
+
+gw_basins = gw_basins%>%
+  mutate(mean_annual_precip = subbasin_precip_means)%>%
+  filter(basin_number %in% c("5-022", "5-021"))
+
+st_write(gw_basins, "Data/GW basins/Filtered/filtered_gw_basins.gpkg", delete_dsn = T)
 ```
 
 
@@ -196,6 +211,7 @@ filtered_sections = sections%>%
 rm(sections)
 
 st_write(filtered_sections, "Data/Sections/Filtered/filtered_sections.gpkg", delete_dsn = T)
+filtered_sections = st_read("Data/Sections/Filtered/filtered_sections.gpkg")
 ```
 
 Not all wells are snapped to the centroid of the section they fall in. Based on the 'geo_accuracy' column, we can pull out the wells with accuracy of coordinates 50ft or less and put a buffer around them for the later matching steps. For example, for a well with accuracy 2.5ft, we can only consider matching that well to parcels within a 2.5ft buffer around that well.
@@ -285,12 +301,25 @@ well_buffer_parcels_ids = unique(well_buffer_parcels$ca_well_id)
 
 Lastly, let's update our cropland parcels dataset using spatial joins, so that it contains columns for the gw basin and section that the parcel has the largest overlap with.
 ```{r, eval = F}
+master_cropland_parcels_covariates = st_read("Data/Parcels/Cropland parcels/master_cropland_parcels_w_covariates.gpkg")
+
 master_cropland_parcels_covariates = master_cropland_parcels%>%
   st_join(., gw_basins%>%select(basin_name:subbasin_name), join = st_intersects, largest = T)%>%
   st_join(., filtered_sections%>%select(MTRS)%>%rename(parcel_MTRS = 1), join = st_intersects, largest = T)
 
-st_write(master_cropland_parcels_covariates, "Data/Parcels/Cropland parcels/master_cropland_parcels_w_covariates.gpkg", row.names = F)
+parcel_precip_means <- exact_extract(crop(precip, ext(master_cropland_parcels_covariates)), master_cropland_parcels_covariates, 'mean', force_df = TRUE)%>%
+  rename_with(~ as.character(1981:2023))%>%
+  mutate(mean_annual_precip = rowMeans(across(everything())))%>%
+  pull(mean_annual_precip)
+
+master_cropland_parcels_covariates = master_cropland_parcels_covariates%>%
+  mutate(mean_annual_precip = parcel_precip_means)
+
+st_write(master_cropland_parcels_covariates, "Data/Parcels/Cropland parcels/master_cropland_parcels_w_covariates.gpkg", row.names = F, delete_dsn = T)
+master_cropland_parcels_covariates = st_read("Data/Parcels/Cropland parcels/master_cropland_parcels_w_covariates.gpkg")
 ```
+
+
 
 # Matching wells with parcels
 
@@ -577,3 +606,4 @@ cropland_parcels_normalised = cropland_parcels_filtered_owners%>%
 
 write.csv(cropland_parcels_normalised%>%data.frame()%>%select(-geom), "Data/Parcels/Cropland parcels/cropland_parcels_normalised.csv", row.names = F)
 ```
+
