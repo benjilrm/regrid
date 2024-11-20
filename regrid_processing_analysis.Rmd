@@ -81,7 +81,7 @@ st_write(gw_basins, "Data/GW basins/Filtered/filtered_gw_basins.gpkg", delete_ds
 Crop raster from [2023 Cropland CROS (USDA)](https://croplandcros.scinet.usda.gov/). Import and reclassify to binary (cropland or not cropland)
 
 ```{r, eval = F}
-cropland_extent_raster = rast("Crop data/crops croplandcros/crops_3311.TIF")
+cropland_extent_raster = rast("Data/Crop data/crops_3311.TIF")
 levels(cropland_extent_raster)
 reclass_matrix = cbind(c(59,92,111,112,121,122,123,124,131,141,142,143,152,176,190,195), 0)
 
@@ -199,6 +199,7 @@ filtered_wells = st_transform(st_as_sf(left_join(usgwd, oswcr, by = "ca_well_id"
 rm(oswcr, wells)
 
 st_write(filtered_wells, "Data/Wells/Processed/filtered_wells_with_section.gpkg", delete_dsn = T)
+filtered_wells = st_read("Data/Wells/Processed/filtered_wells_with_section.gpkg")
 ```
 
 
@@ -261,6 +262,7 @@ end_time = Sys.time()
 end_time - start_time
 
 st_write(filtered_parcels, "Data/Parcels/Filtered parcels/filtered_parcels.gpkg", delete_dsn = T)
+filtered_parcels = st_read("Data/Parcels/Filtered parcels/filtered_parcels.gpkg")
 ```
 
 
@@ -303,14 +305,14 @@ Lastly, let's update our cropland parcels dataset using spatial joins, so that i
 ```{r, eval = F}
 master_cropland_parcels_covariates = st_read("Data/Parcels/Cropland parcels/master_cropland_parcels_w_covariates.gpkg")
 
-master_cropland_parcels_covariates = master_cropland_parcels%>%
-  st_join(., gw_basins%>%select(basin_name:subbasin_name), join = st_intersects, largest = T)%>%
-  st_join(., filtered_sections%>%select(MTRS)%>%rename(parcel_MTRS = 1), join = st_intersects, largest = T)
-
 parcel_precip_means <- exact_extract(crop(precip, ext(master_cropland_parcels_covariates)), master_cropland_parcels_covariates, 'mean', force_df = TRUE)%>%
   rename_with(~ as.character(1981:2023))%>%
   mutate(mean_annual_precip = rowMeans(across(everything())))%>%
   pull(mean_annual_precip)
+
+master_cropland_parcels_covariates = master_cropland_parcels%>%
+  st_join(., gw_basins%>%select(basin_name:subbasin_name), join = st_intersects, largest = T)%>%
+  st_join(., filtered_sections%>%select(MTRS)%>%rename(parcel_MTRS = 1), join = st_intersects, largest = T)
 
 master_cropland_parcels_covariates = master_cropland_parcels_covariates%>%
   mutate(mean_annual_precip = parcel_precip_means)
@@ -469,6 +471,9 @@ final_matches = loop_matches%>%
   filter(!is.na(my_parcel_num))
 
 write.csv(final_matches, "Data/Well-parcel matches/all_matches.csv", row.names = F)
+final_matches = read.csv("Data/Well-parcel matches/all_matches.csv")
+
+final_matches
 ```
 
 
@@ -499,6 +504,8 @@ final_matches_joined = final_matches%>%
   left_join(., filtered_parcels_with_covariates, by = "my_parcel_num")%>%
   filter(cropland_parcel == 1)%>%
   rename(well_depth_ft = Well.Depth..Feet., well_capacity_gpm = Well.Capacity..GPM., well_year = Year.Well.was.Constructed)
+
+write.csv(final_matches_joined, "Data/Well-parcel matches/final_matches_joined.csv")
 ```
 
 ## Filter out public land
@@ -562,14 +569,15 @@ cropland_parcels_filtered_owners = master_cropland_parcels_covariates%>%
   summarise(parcel_area_ha = sum(parcel_area_ha, na.rm = T),
             improvval = sum(improvval, na.rm = T),
             landval = sum(landval, na.rm = T),
-            agval = sum(agval, na.rm = T))%>%
+            agval = sum(agval, na.rm = T),
+            mean_annual_precip = mean(mean_annual_precip, na.rm = T))%>%
   mutate(across(where(is.numeric), ~ na_if(., 0)))
 
-write.csv(cropland_parcels_filtered_owners%>%data.frame()%>%select(-geom), "Data/Parcels/Cropland parcels/cropland_parcels_filtered_owners.csv", row.names = F)
+st_write(cropland_parcels_filtered_owners, "Data/Parcels/Cropland parcels/cropland_parcels_filtered_owners.gpkg", delete_dsn = T)
 ```
 
 
-### Normalise variables
+## Normalise variables
 
 Variables of interest, such as well depth and well yield, might systematically vary across geographies (ex: due to geology or topology, parcels in one subbasin might have on average deeper wells, regardless of parcel size, than another subbasin). Therefore, as a robustness check, we want to normalise these variables, which we can accomplish by calculating a z-score for each well within the subbasin it is located in. 
 
@@ -605,5 +613,55 @@ cropland_parcels_normalised = cropland_parcels_filtered_owners%>%
   mutate(area_z_score = area_z_score - min(area_z_score))
 
 write.csv(cropland_parcels_normalised%>%data.frame()%>%select(-geom), "Data/Parcels/Cropland parcels/cropland_parcels_normalised.csv", row.names = F)
+```
+
+
+# Crop analysis
+```{r}
+cropland_parcels_w_crop_mode = master_cropland_parcels_covariates%>%
+  mutate(crop_mode = exact_extract(cropland_extent_raster, master_cropland_parcels_covariates, fun = "mode", progress = TRUE))%>%
+  left_join(., data.frame(levels(cropland_extent_raster)), by = c("crop_mode" = "Value"))%>%
+  filter(!grepl("Developed|Fallow|Wetlands|Pasture|Shrubland|Grass Seed|Open Water|Forest|Barren|Aquaculture", Class_Name) & !grepl(exclude_owners, owner) & !is.na(owner))%>%
+  mutate(
+    crop_group = case_when(
+      grepl("Chickpea|Dry Beans|Peas|Vetch|Clover", Class_Name) ~ "Legumes",
+      grepl("Safflower|Flaxseed|Canola|Sunflower", Class_Name) ~ "Oil Crops",
+      grepl("Apple|Appricot|Avocado|Cantaloupe|Cherries|Citrus|Grapes|Nectarines|Peaches|Pears|Plums|Pomegranate|Olive|Watermelon|Melons|Strawberries|Apricots|Oranges|Prunes", Class_Name) ~ "Fruits",
+      grepl("Almond|Walnut|Pecan|Pistachio", Class_Name) ~ "Nuts",
+      grepl("Broccoli|Cabbage|Carrot|Cucumber|Garlic|Lettuce|Pepper|Onion|Pumpkin|Squash|Tomato|Turnip|Greens|Herbs|Sweet Potatoes|Potatoes", Class_Name) ~ "Vegetables",
+      grepl("Barley|Corn|Wheat|Oats|Rice|Rye|Sorghum|Dbl Crop|Triticale", Class_Name) ~ "Grains"),
+    crop_group_broad = case_when(
+      crop_group %in% c("Legumes", "Grains") | Class_Name %in% c("Alfalfa", "Other Hay/Non Alfalfa") ~ "Staple",
+      crop_group %in% c("Oil Crops", "Fruits", "Vegetables", "Nuts") | grepl("Misc Vegs|Other Tree Crops|Sugarbeets", Class_Name) ~ "Cash Crop"))
+
+st_write(cropland_parcels_w_crop_mode, "Data/Parcels/Cropland parcels/cropland_parcels_w_cropmode.gpkg", delete.dsn = T)
+```
+
+
+```{r}
+final_matches_sf = filtered_parcels%>%
+  select(my_parcel_num)%>%
+  filter(my_parcel_num %in% final_matches_joined$my_parcel_num)%>%
+  left_join(., final_matches_joined, by = "my_parcel_num")
+
+st_write(final_matches_sf, "Data/Well-parcel matches/final_matches_sf.gpkg")
+
+final_matches_w_crop_mode = final_matches_sf%>%
+  mutate(crop_mode = exact_extract(cropland_extent_raster, final_matches_sf, fun = "mode", progress = TRUE))%>%
+  left_join(., data.frame(levels(cropland_extent_raster)), by = c("crop_mode" = "Value"))%>%
+  filter(!grepl("Developed|Fallow|Wetlands|Pasture|Shrubland|Grass Seed|Open Water|Forest|Barren|Aquaculture", Class_Name) & !grepl(exclude_owners, owner) & !is.na(owner))%>%
+  mutate(
+    crop_group = case_when(
+      grepl("Chickpea|Dry Beans|Peas|Vetch|Clover", Class_Name) ~ "Legumes",
+      grepl("Safflower|Flaxseed|Canola|Sunflower", Class_Name) ~ "Oil Crops",
+      grepl("Apple|Appricot|Avocado|Cantaloupe|Cherries|Citrus|Grapes|Nectarines|Peaches|Pears|Plums|Pomegranate|Olive|Watermelon|Melons|Strawberries|Apricots|Oranges|Prunes", Class_Name) ~ "Fruits",
+      grepl("Almond|Walnut|Pecan|Pistachio", Class_Name) ~ "Nuts",
+      grepl("Broccoli|Cabbage|Carrot|Cucumber|Garlic|Lettuce|Pepper|Onion|Pumpkin|Squash|Tomato|Turnip|Greens|Herbs|Sweet Potatoes|Potatoes", Class_Name) ~ "Vegetables",
+      grepl("Barley|Corn|Wheat|Oats|Rice|Rye|Sorghum|Dbl Crop|Triticale", Class_Name) ~ "Grains"),
+    crop_group_broad = case_when(
+      crop_group %in% c("Legumes", "Grains") | Class_Name %in% c("Alfalfa", "Other Hay/Non Alfalfa") ~ "Staple",
+      crop_group %in% c("Oil Crops", "Fruits", "Vegetables", "Nuts") | grepl("Misc Vegs|Other Tree Crops|Sugarbeets", Class_Name) ~ "Cash Crop"))
+
+st_write(final_matches_w_crop_mode, "Data/Well-parcel matches/final_matches_w_crop_mode.gpkg", delete.dsn = T)
 ```
 

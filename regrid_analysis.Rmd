@@ -18,42 +18,59 @@ library(sf)
 library(tidyverse)
 library(ineq)
 library(tmap)
+library(classInt)
 ```
 
 Set universal variables
 ```{r}
 tmap_mode("view")
+#tmap_mode("plot")
 options(scipen = 999)
+
+round_to_5 <- function(x) {round(x / 5) * 5}
 ```
+# Import processed datasets
+
+Cropland parcels
+```{r}
+cropland_parcels_filtered_owners = st_read("Data/Parcels/Cropland parcels/cropland_parcels_filtered_owners.gpkg")%>%
+  mutate(ratio = improvval / landval)
+cropland_parcels_w_crop_mode = st_read("Data/Parcels/Cropland parcels/cropland_parcels_w_cropmode.gpkg")%>%
+  mutate(ratio = improvval / landval)
+#cropland_parcels_normalised = read.csv("Data/Parcels/Cropland parcels/cropland_parcels_normalised.csv")
+```
+
+Parcel-well matches
+```{r}
+final_matches_joined_filtered_owners = read.csv("Data/Well-parcel matches/final_matches_joined_filtered_owners.csv")%>%
+  mutate(ratio = improved_val / land_val)
+final_matches_joined_normalised = read.csv("Data/Well-parcel matches/final_matches_joined_normalised.csv")
+```
+
+Wells
+```{r}
+wells = st_read("Data/Wells/Processed/filtered_wells_with_section.gpkg")%>%
+  filter(grepl("Irrigation", USGS.Water.Use.Category))
+```
+
+GW basins
+```{r}
+gw_basins = st_read("Data/GW basins/Filtered/filtered_gw_basins.gpkg")
+```
+
+Counties
+```{r}
+ca_counties = st_read("Data/Central Valley counties/central_valley_counties.gpkg")
+```
+
+
+
 
 # Analysis
 
 ## Inequality
 
-### Gini of land
-
-Here, we assess inequality in the distribution of cropland. We do this for cropland parcels with a well match, and as a robustness check, but for all cropland parcels in the Central Valley. Again, we aggregate by subbasin so that nearby farms with the same owner are considered as such rather than separate entities.
-
-
-Let's calculate the gini coefficients for land area, improved parcel value, land value, and agricultural value.
-
-```{r}
-cropland_parcels_filtered_owners = read.csv("Data/Parcels/Cropland parcels/cropland_parcels_filtered_owners.csv")
-#cropland_parcels_normalised = read.csv("Data/Parcels/Cropland parcels/cropland_parcels_normalised.csv")
-```
-
-
-```{r}
-paste("Gini for land area owned:", round(ineq(cropland_parcels_filtered_owners$parcel_area_ha), 3))
-paste("Gini for improved value of land owned:", round(ineq(cropland_parcels_filtered_owners$improvval), 3))
-paste("Gini for land value of land owned:", round(ineq(cropland_parcels_filtered_owners$landval), 3))
-paste("Gini for agricultural value of land owned:", round(ineq(cropland_parcels_filtered_owners$agval), 3))
-
-nrow(cropland_parcels_filtered_owners%>%filter(!is.na(parcel_area_ha)))
-nrow(cropland_parcels_filtered_owners%>%filter(!is.na(improvval)))
-nrow(cropland_parcels_filtered_owners%>%filter(!is.na(landval)))
-nrow(cropland_parcels_filtered_owners%>%filter(!is.na(agval)))
-```
+First, here is a function we can use to calculate the % of total (for different variables, ex: land area, well depth, etc.) that the top x% owns
 ```{r}
 calculate_top_percent <- function(data, variable, top_percent) {
   # Sort data by the variable in descending order, ignoring NAs
@@ -69,49 +86,72 @@ calculate_top_percent <- function(data, variable, top_percent) {
   # Calculate the percentage contribution of the top X%
    percent_contribution <- signif((top_sum / total_sum) * 100, 3)
   return(percent_contribution)}
-
-
-# Apply to each variable
-top_percentages <- data.frame(
-  variable = c("parcel_area_ha", "landval", "improvval", "agval"),
-  top_1_percent = sapply(c("parcel_area_ha", "landval", "improvval", "agval"), 
-                         function(x) calculate_top_percent(cropland_parcels_filtered_owners, x, top_percent = 1)),
-  top_10_percent = sapply(c("parcel_area_ha", "landval", "improvval", "agval"), 
-                          function(x) calculate_top_percent(cropland_parcels_filtered_owners, x, top_percent = 10)))
-
-top_percentages
 ```
 
+
+### Gini of land
+
+Here, we assess inequality in the distribution of cropland. We do this for cropland parcels with a well match, and as a robustness check, but for all cropland parcels in the Central Valley. Again, we aggregate by subbasin so that nearby farms with the same owner are considered as such rather than separate entities.
+
+
+Let's calculate the gini coefficients for land area, improved parcel value, land value, and agricultural value.
+
+
+```{r}
+paste("Gini for land area owned:", round(ineq(cropland_parcels_filtered_owners$parcel_area_ha), 3))
+paste("Gini for improved value of land owned:", round(ineq(cropland_parcels_filtered_owners$improvval), 3))
+paste("Gini for land value of land owned:", round(ineq(cropland_parcels_filtered_owners$landval), 3))
+paste("Gini for agricultural value of land owned:", round(ineq(cropland_parcels_filtered_owners$agval), 3))
+paste("Gini for improved value to land value ratio of land owned:", round(ineq(cropland_parcels_filtered_owners$ratio), 3))
+
+nrow(cropland_parcels_filtered_owners%>%filter(!is.na(parcel_area_ha)))
+nrow(cropland_parcels_filtered_owners%>%filter(!is.na(improvval)))
+nrow(cropland_parcels_filtered_owners%>%filter(!is.na(landval)))
+nrow(cropland_parcels_filtered_owners%>%filter(!is.na(agval)))
+nrow(cropland_parcels_filtered_owners%>%filter(!is.na(ratio)))
+
+```
+
+```{r}
+# Apply to each variable
+top_percentages_land <- data.frame(
+  variable = c("parcel_area_ha", "landval", "improvval", "agval", "ratio"),
+  top_1_percent = sapply(c("parcel_area_ha", "landval", "improvval", "agval", "ratio"), 
+                         function(x) calculate_top_percent(cropland_parcels_filtered_owners, x, top_percent = 1)),
+  top_10_percent = sapply(c("parcel_area_ha", "landval", "improvval", "agval", "ratio"), 
+                          function(x) calculate_top_percent(cropland_parcels_filtered_owners, x, top_percent = 10)))
+
+top_percentages_land
+```
 
 Gini is highest for ag value.
 
 Let's compare this to the ginis when just looking at the subset of parcels with matched wells
 
 ```{r}
-final_matches_joined_filtered_owners = read.csv("Data/Well-parcel matches/final_matches_joined_filtered_owners.csv")
-```
-
-```{r}
 paste("Gini for land area owned:", round(ineq(final_matches_joined_filtered_owners$parcel_area_ha), 3))
 paste("Gini for improved value of land owned:", round(ineq(final_matches_joined_filtered_owners$improved_val), 3))
 paste("Gini for land value of land owned:", round(ineq(final_matches_joined_filtered_owners$land_val), 3))
 paste("Gini for agricultural value of land owned:", round(ineq(final_matches_joined_filtered_owners$ag_val), 3))
+paste("Gini for improved value to land value ratio of land owned:", round(ineq(cropland_parcels_filtered_owners$ratio), 3))
+
 
 nrow(final_matches_joined_filtered_owners%>%filter(!is.na(parcel_area_ha)))
 nrow(final_matches_joined_filtered_owners%>%filter(!is.na(improved_val)))
 nrow(final_matches_joined_filtered_owners%>%filter(!is.na(land_val)))
 nrow(final_matches_joined_filtered_owners%>%filter(!is.na(ag_val)))
+nrow(cropland_parcels_filtered_owners%>%filter(!is.na(ratio)))
 ```
 
 ```{r}
-top_percentages <- data.frame(
+top_percentages_land_matches <- data.frame(
   variable = c("parcel_area_ha", "land_val", "improved_val", "ag_val"),
   top_1_percent = sapply(c("parcel_area_ha", "land_val", "improved_val", "ag_val"),
                          function(x) calculate_top_percent(final_matches_joined_filtered_owners, x, top_percent = 1)),
   top_10_percent = sapply(c("parcel_area_ha", "land_val", "improved_val", "ag_val"),
                           function(x) calculate_top_percent(final_matches_joined_filtered_owners, x, top_percent = 10)))
 
-top_percentages
+top_percentages_land_matches
 ```
 
 
@@ -127,11 +167,6 @@ matched wells, and as a robustness check, for all wells marked for
 irrigation use.
 
 ```{r}
-final_matches_joined_filtered_owners = read.csv("Data/Well-parcel matches/final_matches_joined_filtered_owners.csv")
-final_matches_joined_normalised = read.csv("Data/Well-parcel matches/final_matches_joined_normalised.csv")
-```
-
-```{r}
 #only matched wells, filtering out public wells
 paste("Gini for well depth:", round(ineq(final_matches_joined_filtered_owners$well_depth_ft), 3))
 paste("Gini for well capacity:", round(ineq(final_matches_joined_filtered_owners$well_capacity_gpm), 3))
@@ -139,17 +174,16 @@ paste("Gini for well capacity:", round(ineq(final_matches_joined_filtered_owners
 nrow(final_matches_joined_filtered_owners%>%filter(!is.na(well_capacity_gpm)))
 nrow(final_matches_joined_filtered_owners%>%filter(!is.na(well_depth_ft)))
 
-
-final_matches_joined_filtered_owners
+data.frame(
+  variable = c("well_capacity_gpm", "well_depth_ft"),
+  top_1_percent = sapply(c("well_capacity_gpm", "well_depth_ft"),
+                         function(x) calculate_top_percent(final_matches_joined_filtered_owners, x, top_percent = 1)),
+  top_10_percent = sapply(c("well_capacity_gpm", "well_depth_ft"),
+                          function(x) calculate_top_percent(final_matches_joined_filtered_owners, x, top_percent = 10)))
 
 #only matched wells filtering out public wells (normalised)
 #ineq(final_matches_joined_normalised$depth_z_score - min(final_matches_joined_normalised$depth_z_score, na.rm = T))
 #ineq(final_matches_joined_normalised$yield_z_score - min(final_matches_joined_normalised$yield_z_score, na.rm = T))
-```
-
-```{r}
-wells = read.csv("Data/Wells/Processed/filtered_wells_with_section.gpkg")%>%
-  filter(grepl("Irrigation", USGS.Water.Use.Category))
 ```
 
 
@@ -237,8 +271,8 @@ final_matches_joined_filtered_owners%>%
   summarise(mean = mean(well_capacity_gpm, na.rm = T))%>%
   ggplot(aes(area_percentile, mean))+
   geom_point()+
-  theme_bw()+
-  labs(x = "Percentile of Land Area Owned", y = "Mean Well Capacity (GPM)")
+  theme_bw(14)+
+  labs(x = "Percentile of Land Area Owned", y = "Mean Total Well Capacity Owned \n (GPM)")
 
 final_matches_joined_normalised%>%
   group_by(area_percentile)%>%
@@ -262,7 +296,7 @@ final_matches_joined_normalised%>%
   summarise(mean = mean(yield_z_score, na.rm = T))%>%
   ggplot(aes(area_percentile_z, mean))+
   geom_point()+
-  theme_bw()+
+  theme_bw(20)+
   labs(x = "Percentile of Land Area Owned (Normalised)", y = "Mean Well Capacity Z-Score")
 ```
 
@@ -280,8 +314,8 @@ final_matches_joined_normalised%>%
   summarise(mean = mean(well_depth_ft, na.rm = T))%>%
   ggplot(aes(area_percentile, mean))+
   geom_point()+
-  theme_bw()+
-  labs(x = "Percentile of Land Area Owned", y = "Mean Well Depth (ft)")
+  theme_bw(14)+
+  labs(x = "Percentile of Land Area Owned", y = "Mean Total Well Depth Owned \n (ft)")
 final_matches_joined_normalised%>%
   group_by(area_percentile)%>%
   summarise(mean = mean(depth_z_score, na.rm = T))%>%
@@ -359,8 +393,8 @@ final_matches_joined_filtered_owners%>%
   summarise(mean = mean(well_depth_ft, na.rm = T))%>%
   ggplot(aes(improved_val_percentile, mean))+
   geom_point()+
-  theme_bw()+
-  labs(x = "Percentile of Improved Land Value Owned", y = "Mean Well Depth (ft)")
+  theme_bw(14)+
+  labs(x = "Percentile of Improved Land Value Owned", y = "Mean Total Well Depth Owned \n (ft)")
 
 
 final_matches_joined_normalised%>%
@@ -375,10 +409,11 @@ final_matches_joined_filtered_owners%>%
   summarise(mean = mean(well_capacity_gpm, na.rm = T))%>%
   ggplot(aes(improved_val_percentile, mean))+
   geom_point()+
-  theme_bw()+
-  labs(x = "Percentile of Improved Land Value Owned", y = "Mean Well Capacity (gpm)")
-
+  theme_bw(14)+
+  labs(x = "Percentile of Improved Land Value Owned", y = "Mean Total Well Capacity Owned \n (GPM)")
 ```
+
+
 
 Agricultural value
 
@@ -486,7 +521,7 @@ final_matches_joined_filtered_owners%>%
   group_by(area_percentile)%>%
   summarise(mean_depth = mean(depth_per_ha, na.rm = T))%>%
   ggplot(aes(area_percentile, mean_depth))+
-    geom_point()+
+    geom_point(colour = "#262258")+
     theme_bw()+
     labs(x = "Percentile of Land Area Owned", y = "Mean Well Depth per Hectare \n (ft per ha)")+
     scale_y_log10()
@@ -497,7 +532,7 @@ final_matches_joined_filtered_owners%>%
   group_by(area_percentile)%>%
   summarise(mean_yield = mean(capacity_per_ha, na.rm = T))%>%
   ggplot(aes(area_percentile, mean_yield))+
-    geom_point()+
+    geom_point(colour = "#7a200d")+
     theme_bw()+
     labs(x = "Percentile of Land Area Owned", y = "Mean Well Capacity per Hectare \n (GPM per ha)")+
     scale_y_log10()
@@ -556,146 +591,206 @@ final_matches_joined_filtered_owners%>%
     geom_point()
 ```
 
-## More descriptive stuff
 
-### Precipitation and land size
 
-Use chirps back to 1981
+# Precipitation and gw depletion
 
-1.  Get mean annual precipitation by parcel. Relationship between precip
-    and parcel size / parcel value
+We're pulling in a precipitation raster (annual, 1981-2023) from CHIRPS. We want to get the mean annual precipitation by parcel and GW subbasin so that we can incorporate precipitation into our analysis. For example, 
+
+1.  Get mean annual precipitation by parcel. Relationship between precip and parcel size / parcel value
 2.  By GW basin (or other boundary), relationship between mean
     precipitation and land inequality
 3.  By GW basin (or other boundary), relationship between mean
     precipitation and mean land size/value
 
+
+First, let's see the relationship between mean annual precipitation and parcel area and the parcel scale. 
+
 ```{r}
-precip = rast("Precipitation data/chirps-v2.0.annual.nc")
+summary(lm(data = cropland_parcels_filtered_owners, parcel_area_ha ~ mean_annual_precip))
 
-parcel_precip_means <- exact_extract(crop(precip, ext(master_cropland_parcels)), master_cropland_parcels, 'mean', force_df = TRUE)%>%
-  rename_with(~ as.character(1981:2023))%>%
-  mutate(mean_annual_precip = rowMeans(across(everything())))%>%
-  pull(mean_annual_precip)
-
-master_cropland_parcels_df = master_cropland_parcels%>%
-  mutate(mean_annual_precip = parcel_precip_means)%>%
-  data.frame()
-
-master_cropland_parcels_df
-
-summary(lm(data = master_cropland_parcels_df, parcel_area_ha ~ mean_annual_precip))
+cropland_parcels_filtered_owners%>%
+  ggplot(aes(mean_annual_precip, parcel_area_ha))+
+  geom_hex(bins = 35)+
+  scale_y_log10()
 ```
+Now at subbasin scale
 
 ```{r}
-subbasin_precip_means <- exact_extract(crop(precip, ext(gw_basins)), gw_basins, 'mean', force_df = TRUE)%>%
-  rename_with(~ as.character(1981:2023))%>%
-  mutate(mean_annual_precip = rowMeans(across(everything())))%>%
-  pull(mean_annual_precip)
-gw_basins = gw_basins%>%
-  mutate(mean_annual_precip = subbasin_precip_means)%>%
-  filter(basin_number %in% c("5-022", "5-021"))
-
-stats_by_subbasin = final_matches_joined_filtered_owners%>%
+stats_by_subbasin_matches = final_matches_joined_filtered_owners%>%
   group_by(subbasin_name)%>%
   reframe(
-          median_parcel_area = median(parcel_area_ha, na.rm = T),
+          mean_parcel_area = mean(parcel_area_ha, na.rm = T),
           gini_parcel_area = ineq(parcel_area_ha, na.rm = T),
-          median_well_capacity = median(well_capacity_gpm, na.rm = T),
-          median_well_depth = median(well_depth_ft, na.rm = T),
-          median_well_depth = median(well_depth_ft, na.rm = T),
+          mean_well_capacity = mean(well_capacity_gpm, na.rm = T),
+          mean_well_depth = mean(well_depth_ft, na.rm = T),
           gini_well_capacity = ineq(well_capacity_gpm, na.rm = T),
           gini_well_depth = ineq(well_depth_ft, na.rm = T),
           gini_land_value = ineq(land_val, na.rm =  T),
           gini_ag_value = ineq(ag_val, na.rm = T),
           gini_improved_value = ineq(improved_val, na.rm = T),
+          gini_ratio = ineq(ratio, na.rm = T),
           n = n())%>%
   filter(n > 10)
+gw_basins_matches = merge(gw_basins%>%select(subbasin_number, subbasin_name, mean_annual_precip), stats_by_subbasin_matches)
 
-gw_basins_full = merge(gw_basins%>%select(subbasin_number, subbasin_name, mean_annual_precip), stats_by_subbasin)
+
+stats_by_subbasin_cropland_parcels = cropland_parcels_filtered_owners%>%
+  group_by(subbasin_name)%>%
+  reframe(
+          mean_parcel_area = mean(parcel_area_ha, na.rm = T),
+          median_parcel_area = median(parcel_area_ha, na.rm = T),
+          gini_parcel_area = ineq(parcel_area_ha, na.rm = T),
+          gini_land_value = ineq(landval, na.rm =  T),
+          gini_ag_value = ineq(agval, na.rm = T),
+          gini_improved_value = ineq(improvval, na.rm = T),
+          gini_ratio = ineq(ratio, na.rm = T),
+          n = n())%>%
+  filter(n > 100)
+
+gw_basins_cropland_parcels = merge(gw_basins%>%select(subbasin_number, subbasin_name, mean_annual_precip), stats_by_subbasin_cropland_parcels)
+```
+
+```{r}
+grey_basemap = read_osm(st_bbox(gw_basins), type = "stamen-toner-lite")
+
+tmap_mode(mode = "plot")
+tmap_mode(mode = "view")
 ```
 
 
 ```{r}
-library(classInt)
-round_to_5 <- function(x) {round(x / 5) * 5}
-
-tmap_mode("view")
-tmap_mode("plot")
-
 #precip
-tm_shape(gw_basins) +
-  tm_polygons(col = "mean_annual_precip", palette = "Blues", title = "Mean Annual Precipitation (mm)") 
+  tm_shape(gw_basins) +
+  tm_polygons(col = "mean_annual_precip", palette = "Blues", title = "Mean Annual\nPrecipitation\n(mm)")+
+   tm_scale_bar(position = c("right", "top"), text.size = 5) 
+```
 
 
+```{r}
 #parcel area
-jenks_breaks <- round_to_5(classIntervals(gw_basins_full$median_parcel_area, n = 5, style = "jenks")$brks)
-tm_shape(gw_basins_full) +
-  tm_polygons("median_parcel_area", breaks = jenks_breaks, palette = "Reds", title = "Median Parcel Area (ha)") 
+tm_shape(gw_basins_matches) +
+  tm_polygons(col = "mean_parcel_area", palette = "OrRd", title = "Mean Parcel Area (ha)")
 
-jenks_breaks <- round_to_5(classIntervals(gw_basins_full$gini_parcel_area, n = 5, style = "jenks")$brks)
-tm_shape(gw_basins_full) +
-  tm_polygons(col = "gini_parcel_area", palette = "Blues", title = "Gini Coefficient of Parcel Area") 
+tm_shape(gw_basins_matches) +
+  tm_polygons(col = "gini_parcel_area", palette = "OrRd", title = "Gini Coefficient of Parcel Area")
 
 
+
+tm_shape(gw_basins_cropland_parcels) +
+  tm_polygons("mean_parcel_area", palette = "OrRd", title = "Mean Parcel Area (ha)") 
+
+tm_shape(gw_basins_cropland_parcels) +
+  tm_polygons(col = "median_parcel_area",  palette = "OrRd", title = "Median Parcel Area")
+
+tm_shape(gw_basins_cropland_parcels) +
+  tm_polygons(col = "gini_parcel_area", palette = "OrRd", title = "Gini Coefficient of Parcel Area")
+```
+
+
+```{r}
 #land value
-jenks_breaks <- round_to_5(classIntervals(gw_basins_full$gini_land_value, n = 5, style = "jenks")$brks)
-tm_shape(gw_basins_full) +
+tm_shape(gw_basins_matches) +
   tm_polygons(col = "gini_land_value", palette = "Purples", title = "Gini Coefficient of Land Value") 
 
-jenks_breaks <- round_to_5(classIntervals(gw_basins_full$gini_improved_value, n = 5, style = "jenks")$brks)
-tm_shape(gw_basins_full) +
+tm_shape(gw_basins_matches) +
   tm_polygons(col = "gini_improved_value", palette = "Purples", title = "Gini Coefficient of Improved Land Value")
 
+tm_shape(gw_basins_matches) +
+  tm_polygons(col = "gini_ratio", palette = "Purples", title = "Gini Coefficient of Land Improvement")
+
+
+tm_shape(gw_basins_cropland_parcels) +
+  tm_polygons(col = "gini_land_value", palette = "Purples", title = "Gini Coefficient of Land Value") 
+
+tm_shape(gw_basins_cropland_parcels) +
+  tm_polygons(col = "gini_improved_value", palette = "Purples", title = "Gini Coefficient of Improved Land Value")+
+  tm_scale_bar(position = c("right", "top"), text.size = 5) 
+
+tm_shape(gw_basins_cropland_parcels) +
+  tm_polygons(col = "gini_ratio", palette = "OrRd", title = "Gini Coefficient of Land")
+```
+
+
+```{r}
 #well capacity
-jenks_breaks <- round_to_5(classIntervals(gw_basins_full$median_well_capacity, n = 5, style = "jenks")$brks)
-tm_shape(gw_basins_full) +
-  tm_polygons(col = "median_well_capacity", palette = "Blues", title = "Median Well Capacity (GPM)") 
-jenks_breaks <- round_to_5(classIntervals(gw_basins_full$gini_well_capacity, n = 5, style = "jenks")$brks)
-tm_shape(gw_basins_full) +
-  tm_polygons(col = "gini_well_capacity", palette = "Blues", title = "Gini Coefficient of Well Capacity") 
+tm_shape(gw_basins_matches) +
+  tm_polygons(col = "mean_well_capacity", palette = "Blues", title = "Median Well Capacity (GPM)") 
+tm_shape(gw_basins_matches) +
+  tm_polygons(col = "gini_well_capacity", palette = "YlOrRd", title = "Gini Coefficient of Well Capacity")+
+     tm_scale_bar(position = c("right", "top"), text.size = 5) 
+
 
 #well depth
-jenks_breaks <- round_to_5(classIntervals(gw_basins_full$median_well_depth, n = 5, style = "jenks")$brks)
-tm_shape(gw_basins_full) +
-  tm_polygons(col = "median_well_depth", palette = "RdPu", title = "Median Well Depth (ft)") 
-jenks_breaks <- round_to_5(classIntervals(gw_basins_full$gini_well_depth, n = 5, style = "jenks")$brks)
-tm_shape(gw_basins_full) +
-  tm_polygons(col = "gini_well_depth", palette = "RdPu", title = "Gini Coefficient of Well Depth") 
+tm_shape(gw_basins_matches) +
+  tm_polygons(col = "mean_well_depth", palette = "RdPu", title = "Median Well Depth (ft)") 
+tm_shape(gw_basins_matches) +
+  tm_polygons(col = "gini_well_depth", palette = "RdPu", title = "Gini Coefficient of Well Depth")+
+       tm_scale_bar(position = c("right", "top"), text.size = 5) 
 
-gw_basins_full%>%
+```
+
+
+```{r}
+gw_basins_matches%>%
   ggplot(aes(mean_annual_precip, gini_well_capacity))+
   geom_point()+
   theme_bw()
-gw_basins_full%>%
+gw_basins_matches%>%
   ggplot(aes(mean_annual_precip, gini_well_depth))+
   geom_point()+
   theme_bw()
-gw_basins_full%>%
-  ggplot(aes(mean_annual_precip, median_well_capacity))+
+gw_basins_matches%>%
+  ggplot(aes(mean_annual_precip, mean_well_capacity))+
   geom_point()+
   theme_bw()
-gw_basins_full%>%
-  ggplot(aes(mean_annual_precip, median_well_depth))+
+gw_basins_matches%>% 
+  ggplot(aes(mean_annual_precip, mean_well_depth))+
+  theme_bw()+
+  geom_smooth(method = "lm", fill = "#eba4e4", colour = "#3b0f36")+
+  labs(x = "Mean Annual Precipitation (mm)", y = "Mean Well Depth (ft)")+
+  geom_point(colour = "#3b0f36")
+
+gw_basins_cropland_parcels%>%
+  ggplot(aes(mean_annual_precip, gini_parcel_area))+
+  geom_point()+
+  theme_bw()
+gw_basins_cropland_parcels%>%
+  ggplot(aes(mean_annual_precip, gini_improved_value))+
+  theme_bw(13)+
+  geom_smooth(method = "lm", fill = "#a893d9", colour = "#200e4a")+
+  labs(x = "Mean Annual Precipitation (mm)", y = "Gini Coefficient of \n Improved Land Value Owned")+
+  geom_point(colour = "#200e4a")
+
+gw_basins_cropland_parcels%>%
+  ggplot(aes(mean_annual_precip, gini_land_value))+
+  geom_point()+
+  theme_bw()
+gw_basins_cropland_parcels%>%
+  ggplot(aes(mean_annual_precip, mean_parcel_area))+
+  geom_point()+
+  theme_bw()
+gw_basins_cropland_parcels%>%
+  ggplot(aes(mean_annual_precip, gini_ratio))+
   geom_point()+
   theme_bw()
 ```
 
 
 ```{r}
-summary(lm(data = gw_basins_full, median_parcel_area ~ mean_annual_precip))
-summary(lm(data = gw_basins_full, median_well_depth ~ mean_annual_precip))
-summary(lm(data = gw_basins_full, median_well_capacity ~ mean_annual_precip))
+summary(lm(data = gw_basins_matches, mean_parcel_area ~ mean_annual_precip))
+summary(lm(data = gw_basins_matches, mean_well_depth ~ mean_annual_precip))
+summary(lm(data = gw_basins_matches, mean_well_capacity ~ mean_annual_precip))
 
-summary(lm(data = gw_basins_full, gini_parcel_area ~ mean_annual_precip)) 
-summary(lm(data = gw_basins_full, gini_well_depth ~ mean_annual_precip))
-summary(lm(data = gw_basins_full, gini_well_capacity ~ mean_annual_precip)) #sig
-summary(lm(data = gw_basins_full, gini_land_value ~ mean_annual_precip))
-summary(lm(data = gw_basins_full, gini_ag_value ~ mean_annual_precip)) #sig
-summary(lm(data = gw_basins_full, gini_improved_value ~ mean_annual_precip)) 
+summary(lm(data = gw_basins_cropland_parcels, gini_parcel_area ~ mean_annual_precip)) 
+summary(lm(data = gw_basins_cropland_parcels, gini_land_value ~ mean_annual_precip))
+summary(lm(data = gw_basins_cropland_parcels, gini_ag_value ~ mean_annual_precip)) #sig
+summary(lm(data = gw_basins_cropland_parcels, gini_improved_value ~ mean_annual_precip)) 
+summary(lm(data = gw_basins_matches, mean_parcel_area ~ mean_annual_precip))
 
 ```
 
-### Critical depletion stuff
+# Critical depletion
 
 Options. Relationship between GW basin's critical depletion rating
 and: 1. Mean well depth/yield? 2. Water inequality metric 3. Mean land
@@ -709,93 +804,157 @@ Resources](https://water.ca.gov/-/media/DWR-Website/Web-Pages/Programs/Groundwat
 ```{r}
 overdrafted_subbasins = c("5-022.01", "5-022.04", "5-022.05", "5-022.06", "5-022.07", "5-022.08", "5-022.09", "5-022.11", "5-022.12", "5-022.13", "5-022.14", "6-054")
 
-gw_basins_full = gw_basins_full%>%
+gw_basins_matches = gw_basins_matches%>%
   mutate(critically_overdrafted = as.factor(ifelse(subbasin_number %in% overdrafted_subbasins, 1, 0)))
 
-summary(lm(data = gw_basins_full, gini_well_capacity ~ critically_overdrafted))
-summary(lm(data = gw_basins_full, gini_well_depth ~ critically_overdrafted))
-summary(lm(data = gw_basins_full, gini_improved_value ~ critically_overdrafted))
+gw_basins_cropland_parcels = gw_basins_cropland_parcels%>%
+  mutate(critically_overdrafted = as.factor(ifelse(subbasin_number %in% overdrafted_subbasins, 1, 0)))
 
-ggplot(gw_basins_full, aes(critically_overdrafted, gini_well_capacity))+
-  geom_boxplot(fill = "coral1")+
+summary(lm(data = gw_basins_matches, gini_well_capacity ~ critically_overdrafted))
+summary(lm(data = gw_basins_matches, gini_well_depth ~ critically_overdrafted))
+summary(lm(data = gw_basins_cropland_parcels, gini_improved_value ~ critically_overdrafted))
+summary(lm(data = gw_basins_cropland_parcels, gini_parcel_area ~ critically_overdrafted))
+
+gw_basins_matches = gw_basins_matches%>%
+  mutate(overdraft_label = case_when(
+    critically_overdrafted == 0 ~ "Not critically overdrafted",
+    critically_overdrafted == 1 ~ "Critically overdrafted"))
+
+ggplot(gw_basins_matches, aes(overdraft_label, gini_well_capacity))+
+  geom_boxplot(fill = "#de8b6f")+
   theme_bw()+
-  labs(x = "Critically Overdrafted Status", y = "Gini Coefficient of Well Capacity")
-ggplot(gw_basins_full, aes(critically_overdrafted, median_well_capacity))+
-  geom_boxplot()+
-  theme_bw()
-ggplot(gw_basins_full, aes(critically_overdrafted, gini_well_depth))+
-  geom_boxplot(fill = "skyblue2")+
+  labs(x = "Subbasin Critically Overdrafted Status", y = "Gini Coefficient of Well Capacity")
+ggplot(gw_basins_matches, aes(overdraft_label, gini_well_depth))+
+  geom_boxplot(fill = "#91d3e3")+
   theme_bw()+
   labs(x = "Critically Overdrafted Status", y = "Gini Coefficient of Well Depth")
-ggplot(gw_basins_full, aes(critically_overdrafted, median_well_depth))+
-  geom_boxplot()+
-  theme_bw()
+ggplot(gw_basins_matches, aes(overdraft_label, mean_well_depth))+
+  geom_boxplot(fill = "#88c27e")+
+  theme_bw()+
+  labs(x = "Subbasin Critically Overdrafted Status", y = "Mean Well Depth (ft)")
+ggplot(gw_basins_matches, aes(overdraft_label, mean_well_capacity))+
+  geom_boxplot(fill = "#baa17f")+
+  theme_bw()+
+  labs(x = "Subbasin Critically Overdrafted Status", y = "Mean Well Capacity (GPM)")
 
 
-t.test(gini_well_capacity ~ critically_overdrafted, data = gw_basins_full)
-wilcox.test(gini_well_capacity ~ critically_overdrafted, data = gw_basins_full)
 
-t.test(median_well_depth ~ critically_overdrafted, data = gw_basins_full, var.equal = TRUE)
+t.test(gini_well_capacity ~ critically_overdrafted, data = gw_basins_matches)
+wilcox.test(gini_well_capacity ~ critically_overdrafted, data = gw_basins_matches)
+
+t.test(gini_well_depth ~ critically_overdrafted, data = gw_basins_matches)
+wilcox.test(gini_well_depth ~ critically_overdrafted, data = gw_basins_matches)
+
+t.test(mean_well_depth ~ critically_overdrafted, data = gw_basins_matches, var.equal = TRUE)
 
 ```
 
-## Crop trends
+# Crop trends
 
+Gini coefficient of parcel area by crop group
 ```{r}
-#MAKE SURE TO FILTER OUT PUBLIC LANDS
-cropland_parcels_w_crop_mode = master_cropland_parcels%>%
-  filter(!owner %in% exclude_owners)%>%
-  mutate(exact_extract(cropland_extent_raster, master_cropland_parcels, fun = "mode", progress = TRUE))%>%
-  st_join(., gw_basins%>%select(basin_name:subbasin_name), join = st_intersects, largest = T)%>%
-  data.frame()%>%
-  left_join(., data.frame(levels(cropland_extent_raster)), by = c("exact_extract....." = "Value"))%>%
-  filter(!grepl("Developed|Fallow|Wetlands|Pasture|Shrubland|Grass Seed|Open Water|Forest|Barren|Aquaculture", Class_Name))%>%
-  mutate(
-    crop_group = case_when(
-      grepl("Chickpea|Dry Beans|Peas|Vetch|Clover", Class_Name) ~ "Legumes",
-      grepl("Safflower|Flaxseed|Canola|Sunflower", Class_Name) ~ "Oil Crops",
-      grepl("Apple|Appricot|Avocado|Cantaloupe|Cherries|Citrus|Grapes|Nectarines|Peaches|Pears|Plums|Pomegranate|Olive|Watermelon|Melons", Class_Name) ~ "Fruits",
-      grepl("Almond|Walnut|Pecan|Pistachio", Class_Name) ~ "Nuts",
-      grepl("Broccoli|Cabbage|Carrot|Cucumber|Garlic|Lettuce|Pepper|Onion|Pumpkin|Squash|Tomato|Turnip|Greens|Herbs", Class_Name) ~ "Vegetables",
-      grepl("Barley|Corn|Wheat|Oats|Rice|Rye|Sorghum|Dbl Crop|Triticale", Class_Name) ~ "Grains"),
-    crop_group_broad = case_when(
-      crop_group %in% c("Legumes", "Grains") | Class_Name == "Alfalfa" ~ "Staple",
-      crop_group %in% c("Oil Crops, Fruits, Vegetables, Nuts") | grepl("Misc Vegs|Other Tree Crops|Sugarbeets", Class_Name) ~ "Cash Crop"))
-
-
 cropland_parcels_w_crop_mode%>%
-  group_by(owner, basin_name)%>%
-  reframe(parcel_area_ha = sum(parcel_area_ha))%>%
-  group_by(crop_group_broad)%>%
-  reframe(crop_area_gini = ineq(parcel_area_ha))
-cropland_parcels_w_crop_mode%>%
+  #filter(fraction_cropland > 0.5)%>%
+  group_by(crop_group, owner, subbasin_name)%>%
+  reframe(parcel_area_ha = sum(parcel_area_ha, na.rm = T))%>%
   group_by(crop_group)%>%
+  reframe(crop_area_gini = ineq(parcel_area_ha, na.rm = T))%>%
+  ggplot(aes(crop_group, crop_area_gini, fill = crop_group))+
+  geom_bar(stat = "identity")+
+  theme_bw()+
+  labs(x = "Crop Group", y = "Gini Coefficient of Land Area Owned")
+  
+cropland_parcels_w_crop_mode%>%
+  group_by(crop_group_broad)%>%
   reframe(crop_area_gini = ineq(parcel_area_ha))
 cropland_parcels_w_crop_mode%>%
   group_by(Class_Name)%>%
   reframe(crop_area_gini = ineq(parcel_area_ha))
 
-master_cropland_parcels%>%data.frame()%>%
-  group_by(owner, )
 
-final_matches_joined_filtered_owners
-
-final_matches_joined_filtered_owners%>%
-  mutate(crop = exact_extract(cropland_extent_raster, final_matches_joined_filtered_owners, fun = "mode", progress = TRUE))%>%
-  left_join(., data.frame(levels(cropland_extent_raster)), by = c("crop" = "Value"))%>%
-  filter(!grepl("Developed|Fallow|Wetlands|Pasture|Shrubland|Grass Seed|Open Water|Forest|Barren|Aquaculture", Class_Name))%>%
-  mutate(
-    crop_group = case_when(
-      grepl("Chickpea|Dry Beans|Peas|Vetch|Clover", Class_Name) ~ "Legumes",
-      grepl("Safflower|Flaxseed|Canola|Sunflower", Class_Name) ~ "Oil Crops",
-      grepl("Apple|Appricot|Avocado|Cantaloupe|Cherries|Citrus|Grapes|Nectarines|Peaches|Pears|Plums|Pomegranate|Olive|Watermelon|Melons", Class_Name) ~ "Fruits",
-      grepl("Almond|Walnut|Pecan|Pistachio", Class_Name) ~ "Nuts",
-      grepl("Broccoli|Cabbage|Carrot|Cucumber|Garlic|Lettuce|Pepper|Onion|Pumpkin|Squash|Tomato|Turnip|Greens|Herbs", Class_Name) ~ "Vegetables",
-      grepl("Barley|Corn|Wheat|Oats|Rice|Rye|Sorghum|Dbl Crop|Triticale", Class_Name) ~ "Grains"),
-    crop_group_broad = case_when(
-      crop_group %in% c("Legumes", "Grains") | Class_Name == "Alfalfa" ~ "Staple",
-      crop_group %in% c("Oil Crops, Fruits, Vegetables, Nuts") | grepl("Misc Vegs|Other Tree Crops|Sugarbeets", Class_Name) ~ "Cash Crop"))
+final_matches_w_crop_mode%>%
+  #filter(fraction_cropland > 0.5)%>%
+  group_by(crop_group, owner, subbasin_name)%>%
+  reframe(parcel_area_ha = sum(parcel_area_ha, na.rm = T))%>%
+  group_by(crop_group)%>%
+  reframe(crop_area_gini = ineq(parcel_area_ha, na.rm = T))%>%
+  ggplot(aes(crop_group, crop_area_gini, fill = crop_group))+
+  geom_bar(stat = "identity")+
+  theme_bw()+
+  labs(x = "Crop Group", y = "Gini Coefficient of Land Area Owned")
 ```
+
+Prevalence of different crop groups across land ownership percentiles
+```{r}
+cropland_parcels_w_crop_mode%>%
+  group_by(crop_group_broad, owner, subbasin_name)%>%
+  reframe(parcel_area_ha = sum(parcel_area_ha, na.rm = T))%>%
+  mutate(percentile_area = ntile(parcel_area_ha, 100), cash_crop = ifelse(crop_group_broad == "Cash Crop", 1, 0))%>%
+  group_by(percentile_area)%>%
+  reframe(cash_crop = mean(cash_crop, na.rm = T))%>%
+  ggplot(aes(percentile_area, cash_crop))+
+  geom_bar(stat = "identity", colour = "black", fill = "coral1")+
+  labs(x = "Percentile of Total Land Area Owned", y = "Proportion of Cash Crop Farms")+
+  theme_bw()
+
+cropland_parcels_w_crop_mode%>%
+  group_by(crop_group, owner, subbasin_name)%>%
+  reframe(parcel_area_ha = sum(parcel_area_ha, na.rm = T))%>%
+  mutate(percentile_area = ntile(parcel_area_ha, 100))%>%
+  mutate(value = 1)%>%   # Add a column to indicate presence (1)
+  pivot_wider(
+    names_from = crop_group,
+    values_from = value,
+    values_fill = list(value = 0))%>%
+  group_by(percentile_area)%>%
+  summarise(across(Fruits:Vegetables, mean, na.rm = TRUE))%>%
+  pivot_longer(Fruits:Vegetables, names_to = "crop_group", values_to = "value")%>%
+  ggplot(aes(percentile_area, value, colour = crop_group))+
+  geom_line(size = 1)+
+  theme_bw()+
+  labs(x = "Percentile of Total Land Area Owned", y = "Proportion of Farms", colour = "Crop Group")
+```
+
+
+```{r}
+final_matches_w_crop_mode%>%
+  group_by(crop_group_broad, owner, subbasin_name)%>%
+  reframe(parcel_area_ha = sum(parcel_area_ha, na.rm = T))%>%
+  mutate(percentile_area = ntile(parcel_area_ha, 100), cash_crop = ifelse(crop_group_broad == "Cash Crop", 1, 0))%>%
+  group_by(percentile_area)%>%
+  reframe(cash_crop = mean(cash_crop, na.rm = T))%>%
+  ggplot(aes(percentile_area, cash_crop))+
+  geom_bar(stat = "identity", colour = "black", fill = "coral1")+
+  labs(x = "Percentile of Total Land Area Owned", y = "Proportion of Cash Crop Farms")+
+  theme_bw()
+
+final_matches_w_crop_mode%>%
+  group_by(crop_group, owner, subbasin_name)%>%
+  reframe(parcel_area_ha = sum(parcel_area_ha, na.rm = T))%>%
+  mutate(percentile_area = ntile(parcel_area_ha, 100))%>%
+  mutate(value = 1)%>%   # Add a column to indicate presence (1)
+  pivot_wider(
+    names_from = crop_group,
+    values_from = value,
+    values_fill = list(value = 0))%>%
+  group_by(percentile_area)%>%
+  summarise(across(Fruits:Vegetables, mean, na.rm = TRUE))%>%
+  pivot_longer(Fruits:Vegetables, names_to = "crop_group", values_to = "value")%>%
+  ggplot(aes(percentile_area, value, colour = crop_group))+
+  geom_line(size = 1)+
+  theme_bw()+
+  labs(x = "Percentile of Total Land Area Owned", y = "Proportion of Farms", colour = "Crop Group")
+```
+
+
+
+#bring in well component
+
+
+
+
+
+
 
 ```{r}
 # Extract land use values and area fractions for each parcel
