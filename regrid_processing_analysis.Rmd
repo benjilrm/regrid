@@ -438,7 +438,7 @@ table(loop_matches$match_method)
 Let's run some quick diagnostics to get a sense of how many matches we got for each method
 ```{r}
 table(loop_matches%>%filter(!is.na(my_parcel_num))%>%
-  left_join(., filtered_wells%>%select(ca_well_id, APN), by = "ca_well_id")%>%
+  left_join(., filtered_wells%>%dplyr::select(ca_well_id, APN), by = "ca_well_id")%>%
   #left_join(., filtered_parcels_with_section%>%select(my_parcel_num, parcel_id, parcelnumb_no_formatting, MTRS), by = c("my_parcel_num" = "my_parcel_num", "section" = "MTRS"))%>%
   pull(match_method))
 
@@ -466,17 +466,17 @@ to an actual address (rather than an intersection, POI, etc., which would mess u
 ```{r, eval = F}
 geocoded_wells = st_transform(st_read("Data/Well-parcel matches/Geocoding/Geocoded well addresses/geocoded_wells.shp"), crs = crs)%>%
   filter(!is.na(Addr_type) & !Addr_type %in% c("StreetName", "StreetMidBlock", "Locality", "StreetInt", "POI") & Score > 90)%>%
-  select(USER_ca_we)%>%
+  dplyr::select(USER_ca_we)%>%
   rename(ca_well_id = 1)
 ```
 
 Spatially join geocoded wells to the respective parcels they fall in
 ```{r, eval = F}
 geocoded_wells_joined = geocoded_wells%>%
-  st_join(., filtered_parcels%>%select(my_parcel_num), join = st_within)%>%
+  st_join(., filtered_parcels%>%dplyr::select(my_parcel_num), join = st_within)%>%
   filter(!is.na(my_parcel_num))%>%
   rename(my_parcel_num_geocoded = 2)%>%
-  data.frame()%>%select(-geometry)
+  data.frame()%>%dplyr::select(-geometry)
 
 geocoded_wells_joined
 ```
@@ -504,7 +504,7 @@ final_matches_joined = final_matches%>%
   left_join(., filtered_wells%>%data.frame()%>%
               mutate(well_depth_m = Well.Depth..Feet. * ft_to_m, well_capacity_lps = Well.Capacity..GPM. * gpm_to_lps)%>%
               rename(well_year = Year.Well.was.Constructed)%>%
-              select(ca_well_id, well_depth_m, well_capacity_lps, well_year,
+              dplyr::select(ca_well_id, well_depth_m, well_capacity_lps, well_year,
                      USGS.Water.Use.Category), 
             by = "ca_well_id")
 
@@ -523,10 +523,10 @@ First, prepare relevant parcel data to join to matches. We want to filter for on
 filtered_parcels_with_covariates = filtered_parcels%>%
   filter(my_parcel_num %in% final_matches$my_parcel_num)%>%
   st_join(., gw_basins, join = st_intersects, largest = T)%>%
-  #st_join(., filtered_sections%>%select(MTRS)%>%rename(parcel_MTRS = 1), join = st_intersects, largest = T)%>%
-  select(usedesc:agval, owner:owner4, cdl_majority_category:cdl_majority_percent, fraction_cropland:my_parcel_num, basin_name:parcel_MTRS)
+  st_join(., filtered_sections%>%dplyr::select(MTRS)%>%rename(parcel_MTRS = 1), join = st_intersects, largest = T)%>%
+  dplyr::select(usedesc:agval, owner:owner4, cdl_majority_category:cdl_majority_percent, fraction_cropland:my_parcel_num, basin_name:parcel_MTRS)
 
-st_write(filtered_parcels_with_covariates, "Data/Parcels/Filtered parcels/filtered_parcels_with_covariates.gpkg")
+st_write(filtered_parcels_with_covariates, "Data/Parcels/Filtered parcels/filtered_parcels_with_covariates.gpkg", delete_dsn = T)
 filtered_parcels_with_covariates = st_read("Data/Parcels/Filtered parcels/filtered_parcels_with_covariates.gpkg")
 ```
 ## Exclude public land 
