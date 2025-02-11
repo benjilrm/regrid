@@ -39,7 +39,7 @@ cropland_parcels_w_crop_precise = st_read("Data/Parcels/Cropland parcels/croplan
 
 Parcel-well matches
 ```{r}
-final_matches_joined = read.csv("Data/Well-parcel matches/final_matches_joined.csv")
+final_matches_joined = read_csv("Data/Well-parcel matches/final_matches_joined.csv")
 
 final_matches_joined_filtered_owners = read_csv("Data/Well-parcel matches/final_matches_joined_filtered_owners.csv")
 
@@ -121,14 +121,11 @@ wells = wells%>%
   mutate(na_capacity = ifelse(is.na(well_capacity_lps), 1, 0))
 
 wells%>%
-  ggplot(aes(na_capacity, normalised_depth))+
-  geom_boxplot()+
-  theme_bw()
-
-wells%>%
+  mutate(na_capacity = ifelse(na_capacity == 1, "Missing", "Not Missing"))%>%
   ggplot(aes(na_capacity, well_depth_m))+
-  geom_boxplot()+
-  theme_bw()
+  geom_boxplot(fill = "#d7b2ec")+
+  theme_bw()+
+  labs(x = "Well Capacity Missingness", y = "Well Depth (m)")
 
 hist(wells$normalised_depth)
 
@@ -139,7 +136,8 @@ wells %>%
   reframe(na_perc = sum(na_capacity) / n() * 100)%>%
   ggplot(aes(well_year, na_perc))+
   geom_point()+
-  theme_bw()
+  theme_bw()+
+  labs(x = "Year of Well Construction", y = "Percent Missingness of Well Capacity")
 
 summary(lm(na_perc ~ well_year, data = wells %>%group_by(well_year)%>%reframe(na_perc = sum(na_capacity) / n() * 100)))
 ```

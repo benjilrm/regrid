@@ -635,7 +635,8 @@ filtered_parcels_filtered_owners = filtered_parcels_filtered_owners%>%
 final_matches_joined = final_matches_joined%>%
   left_join(., filtered_parcels_filtered_owners%>%dplyr::select(my_parcel_num, mean_depth_to_gw), by = "my_parcel_num")%>%
   mutate(normalised_depth = well_depth_m - mean_depth_to_gw,
-         max_depth_normalised = well_depth_m - mean_depth_to_gw)
+         max_depth_normalised = well_depth_m - mean_depth_to_gw)%>%
+  dplyr::select(-geom)
 
 write.csv(final_matches_joined, "Data/Well-parcel matches/final_matches_joined.csv", row.names = F)
 ```
