@@ -698,14 +698,18 @@ final_matches_grouped_by_subbasin = final_matches_joined_filtered_owners%>%
          improved_val_percentile = ntile(improved_val, 100))%>%
   group_by(subbasin_name)%>%
   mutate(subbasin_n = n(), 
+         num_wells_z = (num_wells - mean(num_wells, na.rm = T)) / sd(num_wells, na.rm = T),
          depth_z_score = (well_depth_m - mean(well_depth_m, na.rm = T)) / sd(well_depth_m, na.rm = T),
+         depth_norm_z_score = (normalised_depth - mean(normalised_depth, na.rm = T)) / sd(normalised_depth, na.rm = T),
          area_z_score = (parcel_area_ha - mean(parcel_area_ha, na.rm = T)) / sd(parcel_area_ha, na.rm = T),
          cropland_area_z_score = (cropland_area - mean(cropland_area, na.rm = T)) / sd(cropland_area, na.rm = T),
          yield_z_score = (well_capacity_lps - mean(well_capacity_lps, na.rm = T)) / sd(well_capacity_lps, na.rm = T),
          landval_z_score = (land_val - mean(land_val, na.rm = T)) / sd(land_val, na.rm = T),
          improved_val_z_score = (improved_val - mean(improved_val, na.rm = T)) / sd(improved_val, na.rm = T),
          area_percentile_z = ntile(area_z_score, 100),
-         cropland_area_percentile_z = ntile(cropland_area_z_score, 100))
+         cropland_area_percentile_z = ntile(cropland_area_z_score, 100),
+         land_val_percentile_z = ntile(landval_z_score, 100),
+         improved_val_percentile_z = ntile(improved_val_z_score, 100))
 
 cropland_parcels_grouped_by_subbasin = cropland_parcels_filtered_owners%>%
   group_by(cleaned_owner, subbasin_name)%>%
@@ -972,110 +976,17 @@ st_write(cropland_parcels_with_agencies, "Data/Parcels/Cropland parcels/cropland
 cropland_parcels_with_agencies = st_read("Data/Parcels/Cropland parcels/cropland_parcels_with_sw_agencies.gpkg")
 ```
 
-We can conduct analysis to see if prevalence of intersecting these surface water districts varies by percentile of cropland area ownership. 
-```{r}
-cropland_parcels_with_agencies%>%
-  left_join(., cropland_parcels_grouped_overall%>%mutate(cropland_area_percentile = ntile(cropland_area, 100))%>%rename_with(~ str_c("owner_", .), .cols = -cleaned_owner), by = "cleaned_owner")%>%
-  group_by(owner_cropland_area_percentile)%>%
-  reframe(sw = mean(sw_parcel), sw_area = sum(sw_parcel*cropland_area)/sum(cropland_area))%>%
-  ggplot(aes(owner_cropland_area_percentile, sw*100))+
-  geom_point()+
-  theme_bw()+
-  labs(x = "Percentile of Cropland Area Owned", y = "% Parcels Intersecting Water Agency Boundaries")
-
-
-cropland_parcels_with_agencies%>%
-  mutate(sw_parcel = ifelse(agency_type %in% c("Irrigation & water districts", "Individuals and family trusts", "Individual ranches, farms, etc"), 1, 0))%>%
-  left_join(., cropland_parcels_grouped_overall%>%mutate(cropland_area_percentile = ntile(cropland_area, 100))%>%rename_with(~ str_c("owner_", .), .cols = -cleaned_owner), by = "cleaned_owner")%>%
-  group_by(owner_cropland_area_percentile)%>%
-  reframe(sw = mean(sw_parcel), sw_area = sum(sw_parcel*cropland_area)/sum(cropland_area))%>%
-  ggplot(aes(owner_cropland_area_percentile, sw_area*100))+
-  geom_point()+
-  theme_bw()+
-  labs(x = "Percentile of Total Cropland Area Owned", y = "% Parcels Intersecting SW Districts")
-
-
-cropland_parcels_with_agencies%>%
-  mutate(sw_parcel = ifelse(agency_type %in% c("Irrigation & water districts"), 1, 0))%>%
-  left_join(., cropland_parcels_grouped_overall%>%mutate(cropland_area_percentile = ntile(cropland_area, 100))%>%rename_with(~ str_c("owner_", .), .cols = -cleaned_owner), by = "cleaned_owner")%>%
-  group_by(cleaned_owner, owner_cropland_area_percentile)%>%
-  reframe(sw = mean(sw_parcel), sw_area = sum(sw_parcel*cropland_area)/sum(cropland_area))%>%
-  group_by(owner_cropland_area_percentile)%>%
-  reframe(sw_area = mean(sw_area))%>%
-  ggplot(aes(owner_cropland_area_percentile, sw_area*100))+
-  geom_point()+
-  theme_bw()+
-  labs(x = "Percentile of Total Cropland Area Owned", y = "% Parcels Intersecting Irrigation Districts")
-```
-
 We can do the same with well-parcel matches to examine how intersection with surface water districts varies by percentile of well depth and well capacity owned.
 ```{r}
 parcels_with_agencies = filtered_parcels_filtered_owners%>%
   left_join(., final_matches_grouped_by_parcel, by = "my_parcel_num")%>%
   left_join(., final_matches_grouped_overall%>%rename_with(~ str_c("owner_", .), .cols = -final_owner), by = "final_owner")%>%
-  st_join(., agencies%>%select(AGENCYNAME), join = st_intersects, largest = T)%>%
+  st_join(., agencies_filtered%>%dplyr::select(AGENCYNAME, agency_type), join = st_intersects, largest = T)%>%
   mutate(sw_parcel = ifelse(!is.na(AGENCYNAME), 1, 0))
-parcels_with_agencies%>%data.frame()
 
-parcels_with_agencies%>%
-  group_by(owner_cropland_area_percentile)%>%
-  reframe(sw = mean(sw_parcel), sw_area = sum(sw_parcel*cropland_area)/sum(cropland_area))%>%
-  ggplot(aes(owner_cropland_area_percentile, sw_area*100))+
-  geom_point()+
-  theme_bw()+
-  labs(x = "Percentile of Cropland Area Owned", y = "% Parcels Intersecting Water Agency Boundaries \n (weighted by parcel area)")
-parcels_with_agencies%>%
-  group_by(owner_depth_percentile)%>%
-  reframe(sw = mean(sw_parcel), sw_area = sum(sw_parcel*cropland_area)/sum(cropland_area))%>%
-  ggplot(aes(owner_depth_percentile, sw_area*100))+
-  geom_point()+
-  theme_bw()+
-  labs(x = "Percentile of Total Well Depth Owned", y = "% Parcels Intersecting Water Agency Boundaries \n (weighted by parcel area)")
-parcels_with_agencies%>%
-  group_by(owner_capacity_percentile)%>%
-  reframe(sw = mean(sw_parcel), sw_area = sum(sw_parcel*cropland_area)/sum(cropland_area))%>%
-  ggplot(aes(owner_capacity_percentile, sw_area*100))+
-  geom_point()+
-  theme_bw()+
-  labs(x = "Percentile of Total Well capacity Owned", y = "% Parcels Intersecting Water Agency Boundaries \n (weighted by parcel area)")
-
-
-parcels_with_agencies%>%
-  group_by(final_owner, subbasin_name, owner_cropland_area_percentile)%>%
-  reframe(sw = sum(sw_parcel*cropland_area)/sum(cropland_area))%>%
-  group_by(subbasin_name)%>%
-  mutate(mean_sw = mean(sw, na.rm = T), sd_sw = sd(sw, na.rm = T))%>%
-  ungroup()%>%
-  mutate(sw_z = (sw-mean_sw)/sd_sw)%>%
-  group_by(owner_cropland_area_percentile)%>%
-  reframe(sw_z = mean(sw_z, na.rm = T))%>%
-  ggplot(aes(owner_cropland_area_percentile, sw_z))+
-  geom_point()
-parcels_with_agencies%>%
-  group_by(final_owner, subbasin_name, owner_depth_percentile)%>%
-  reframe(sw = sum(sw_parcel*cropland_area)/sum(cropland_area))%>%
-  group_by(subbasin_name)%>%
-  mutate(mean_sw = mean(sw, na.rm = T), sd_sw = sd(sw, na.rm = T))%>%
-  ungroup()%>%
-  mutate(sw_z = (sw-mean_sw)/sd_sw)%>%
-  group_by(owner_depth_percentile)%>%
-  reframe(sw_z = mean(sw_z, na.rm = T))%>%
-  ggplot(aes(owner_depth_percentile, sw_z))+
-  geom_point()
-parcels_with_agencies%>%
-  group_by(final_owner, subbasin_name, owner_capacity_percentile)%>%
-  reframe(sw = sum(sw_parcel*cropland_area)/sum(cropland_area))%>%
-  group_by(subbasin_name)%>%
-  mutate(mean_sw = mean(sw, na.rm = T), sd_sw = sd(sw, na.rm = T))%>%
-  ungroup()%>%
-  mutate(sw_z = (sw-mean_sw)/sd_sw)%>%
-  group_by(owner_capacity_percentile)%>%
-  reframe(sw_z = mean(sw_z, na.rm = T))%>%
-  ggplot(aes(owner_capacity_percentile, sw_z))+
-  geom_point()
+st_write(parcels_with_agencies, "Data/Parcels/Filtered parcels/filtered_parcels_with_sw_agencies.gpkg")
+parcels_with_agencies = st_read("Data/Parcels/Filtered parcels/filtered_parcels_with_sw_agencies.gpkg")
 ```
-
-
 
 # Archive
 
