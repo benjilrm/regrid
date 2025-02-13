@@ -19,6 +19,7 @@ library(tigris)
 library(stringdist)
 library(fastcluster)
 library(raster)
+library(tmap)
 ```
 
 Set universal variables
@@ -32,6 +33,7 @@ crs = 3310 #NAD83 California Albers project
 cropland_threshold = 0.05 #threshold of proportion of parcel area that is cropland in order to be considered a cropland parcel
 area_threshold = 2 #minimum hectares for parcel area
 
+tmap_mode("view")
 ```
 
 # Import and process data
@@ -913,14 +915,16 @@ agencies_all = st_transform(st_read("Data/Water Agencies/i03_WaterDistricts.shp"
     grepl("public water|community|municipal|sewer|utilit|water company|service|csd|water users|sanitary|sanitation|treatment|maintenance|svc. dist|water corporation|mutual water|water system|waste|water works|joint powers|mwc|mutual|md|water association", AGENCYNAME, ignore.case = T) |
      AGENCYNAME %in% c("Nord Road Water Association") ~ "Drinking water and sewage",
     
-    grepl("Irrigation|Water District|wd|canal|agricultural|improvement district|storage district|slough|water bank|rio oso|San Joaquin River Exchange|bend district", AGENCYNAME, ignore.case = T)   ~ "Irrigation & water districts",
+    grepl("Irrigation|Water District|wd|canal|agricultural|improvement district|storage district|slough|water bank|rio oso|San Joaquin River Exchange|bend district", AGENCYNAME, ignore.case = T) | AGENCYNAME %in% c("South Delta Water Agency", "Central Delta Water Agency", "North Delta Water Agency")   ~ "Irrigation & water districts",
+    
+    grepl("conservation district|reclamation district", AGENCYNAME, ignore.case = T) & !grepl("county", AGENCYNAME, ignore.case = T) ~ "Conservation and Reclamation Districts",
     
     grepl("water agency", AGENCYNAME, ignore.case = T) ~
       "Other types of agencies",
     
-    grepl("City|county|school|indian|caltrans|town of|sheriff|state fair|air force|defense|naval|airport", AGENCYNAME, ignore.case = T) ~ "Cities, counties, public land, etc.", 
+    grepl("City|county|indian|caltrans|town of|sheriff|state fair|air force|defense|naval|airport", AGENCYNAME, ignore.case = T) ~ "Cities, counties, public land, etc.", 
     
-   grepl("school|uc davis|csu|college|research|uc davis|kearney", AGENCYNAME, ignore.case = T) | AGENCYNAME %in% c("Genetic Resource Center") ~  "Education/Research",
+   grepl("school|uc davis|csu|school|college|research|uc davis|kearney", AGENCYNAME, ignore.case = T) | AGENCYNAME %in% c("Genetic Resource Center") ~  "Education/Research",
    
    grepl("unlimited", AGENCYNAME, ignore.case = T) ~ "Plumbers",
    
@@ -966,8 +970,17 @@ write.csv(agencies_all%>%data.frame()%>%dplyr::select(AGENCYNAME, agency_type), 
 ```
 
 ```{r}
+agencies_all%>%
+  #filter(agency_type == "Conservation and Reclamation Districts")%>%
+  filter(grepl("South Delta", AGENCYNAME))%>%
+  data.frame()
+    
+```
+
+
+```{r}
 tm_shape(agencies_all%>%
-           filter(grepl("Buttonwillow Community Water District", AGENCYNAME, ignore.case = T) | AGENCYNAME %in% c("")))+
+           filter(AGENCYNAME == "Central San Joaquin Water Conservation District"))+
   tm_borders(lwd = 10, "black")+
   tm_basemap("Esri.WorldImagery")
 ```
@@ -975,9 +988,9 @@ tm_shape(agencies_all%>%
 Filter only the groups that can reasonably assumed to be receiving surface water for irrigation, based on the above examination
 ```{r}
 agencies_filtered = agencies_all%>%
-  filter(agency_type %in% c("Irrigation & water districts", "Individuals and family trusts", "Individual ranches, farms, etc", "Other types of agencies"))
+  filter(agency_type %in% c("Irrigation & water districts", "Individuals and family trusts", "Individual ranches, farms, etc", "Conservation and Reclamation Districts"))
 
-agencies_filtered%>%data.frame()
+agencies_filtered%>%data.frame()%>%arrange(AGENCYNAME)
 ```
 
 Use a spatial join to see if each cropland parcel intersects one of these surface water districts or not. 
