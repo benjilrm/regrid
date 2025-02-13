@@ -208,7 +208,7 @@ Clean up the IDs, addresses, and such (ex: turn addresses to lowercase so capita
 filtered_wells = st_transform(st_as_sf(left_join(usgwd, oswcr, by = "ca_well_id")%>%
                                    filter(!is.na(Longitude) & !is.na(Latitude)), 
                                  coords = c("Longitude", "Latitude"), crs = 4326), crs)%>%
-  filter(grepl("Irrigation|Unknown", USGS.Water.Use.Category))%>%
+  filter(grepl("Agriculture", use_oswcr) | use_oswcr == "Unknown")%>%
   mutate_at(vars(well_address, city), ~ na_if(., ""))%>%
   separate(well_address, into = c("address_no", "address_st"), sep = " ", extra = "merge", convert = T, remove = F)%>%
   st_join(., sections)%>%
@@ -233,7 +233,7 @@ filtered_sections = sections%>%
 rm(sections)
 
 st_write(filtered_sections, "Data/Sections/Filtered/filtered_sections.gpkg", delete_dsn = T)
-filtered_sections = st_read("Data/Sections/Filtered/filtered_sections.gpkg")
+filtered_sections = st_read("Data/Sections/Filtered/filtered_PLSS_sections.gpkg")
 ```
 
 Not all wells are snapped to the centroid of the section they fall in. Based on the 'geo_accuracy' column, we can pull out the wells with accuracy of coordinates 50ft or less and put a buffer around them for the later matching steps. For example, for a well with accuracy 2.5ft, we can only consider matching that well to parcels within a 2.5ft buffer around that well.
@@ -784,6 +784,16 @@ write.csv(final_matches_grouped_by_subbasin, "Data/Well-parcel matches/final_mat
 
 write.csv(final_matches_grouped_overall, "Data/Well-parcel matches/final_matches_grouped_overall.csv", row.names = F)
 final_matches_grouped_overall = read.csv("Data/Well-parcel matches/final_matches_grouped_overall.csv")
+
+
+write.csv(final_matches_joined_filtered_owners%>%dplyr::select(-c(1:2, parval:cdl_majority_percent, cleaned_owner:final_owner)), "Data/Well-parcel matches/final well-parcel matches, deidentified.csv", row.names = F)
+
+
+# Calculate centroids
+centroids <- st_centroid(polygons)
+
+# Export centroids as a shapefile
+st_write(centroids, "centroids.shp", driver = "ESRI Shapefile")
 ```
 
 Cropland parcels
@@ -795,6 +805,8 @@ st_write(cropland_parcels_grouped_overall, "Data/Parcels/Cropland parcels/cropla
 cropland_parcels_grouped_overall = st_read("Data/Parcels/Cropland parcels/cropland_parcels_filtered_owners_grouped_overall.gpkg")
 
 st_write(cropland_parcels_grouped_by_subbasin, "Data/Parcels/Cropland parcels/cropland_parcels_filtered_owners_grouped_by_subbasin.gpkg", delete_dsn = T)
+
+st_write(st_centroid(cropland_parcels_filtered_owners%>%dplyr::select(-c(2:7, 10:50))), "Data/Parcels/Cropland parcels/cropland_parcels_filtered_owners_deidentified.gpkg")
 ```
 
 
@@ -964,15 +976,17 @@ Filter only the groups that can reasonably assumed to be receiving surface water
 ```{r}
 agencies_filtered = agencies_all%>%
   filter(agency_type %in% c("Irrigation & water districts", "Individuals and family trusts", "Individual ranches, farms, etc", "Other types of agencies"))
+
+agencies_filtered%>%data.frame()
 ```
 
 Use a spatial join to see if each cropland parcel intersects one of these surface water districts or not. 
 ```{r}
 cropland_parcels_with_agencies = cropland_parcels_filtered_owners%>%
-  st_join(., agencies_filtered%>%select(AGENCYNAME, agency_type), join = st_intersects, largest = T)%>%
+  st_join(., agencies_filtered%>%dplyr::select(AGENCYNAME, agency_type), join = st_intersects, largest = T)%>%
   mutate(sw_parcel = ifelse(!is.na(AGENCYNAME), 1, 0))
 
-st_write(cropland_parcels_with_agencies, "Data/Parcels/Cropland parcels/cropland_parcels_with_sw_agencies.gpkg")
+st_write(cropland_parcels_with_agencies, "Data/Parcels/Cropland parcels/cropland_parcels_with_sw_agencies.gpkg", delete_dsn = T)
 cropland_parcels_with_agencies = st_read("Data/Parcels/Cropland parcels/cropland_parcels_with_sw_agencies.gpkg")
 ```
 
