@@ -15,6 +15,8 @@ library(tmap)
 library(classInt)
 library(skimr)
 library(psych)
+library(modelsummary)
+library(flextable)
 ```
 
 Set universal variables
@@ -203,6 +205,11 @@ top_percentages_land <- data.frame(
                           function(x) calculate_top_percent(cropland_parcels_grouped_overall, x, top_percent = 10)))
 
 top_percentages_land
+
+boot.ci( boot(cropland_parcels_grouped_overall$cropland_area, boot_gini, R = 1000), type = "perc")
+boot.ci( boot(cropland_parcels_grouped_overall$landval, boot_gini, R = 1000), type = "perc")
+boot.ci( boot(cropland_parcels_grouped_overall$improvval, boot_gini, R = 1000), type = "perc")
+
 ```
 
 
@@ -228,6 +235,21 @@ data.frame(
                          function(x) calculate_top_percent(final_matches_grouped_overall, x, top_percent = 1)),
   top_10_percent = sapply(c("well_depth_m", "normalised_depth", "well_capacity_lps"),
                           function(x) calculate_top_percent(final_matches_grouped_overall, x, top_percent = 10)))
+```
+
+```{r}
+library(boot)
+
+# Define bootstrap function
+boot_gini <- function(data, indices) {
+  sample_data <- data[indices]
+  return(ineq(sample_data))}
+
+# Run bootstrap (1000 replicates)
+set.seed(123)  # For reproducibility
+
+boot.ci( boot(final_matches_grouped_overall$normalised_depth, boot_gini, R = 1000), type = "perc")
+boot.ci( boot(final_matches_grouped_overall$well_capacity_lps, boot_gini, R = 1000), type = "perc")
 ```
 
 
@@ -296,11 +318,27 @@ the log x and log y axes, means that the true relationship is non-linear (power-
 We can also confirm these visual trends by running some regressions.
 ```{r}
 summary(lm(data = final_matches_grouped_overall, log(well_depth_m) ~ log(cropland_area)))
+summary(lm(data = final_matches_grouped_overall, log(normalised_depth) ~ log(cropland_area)))
 summary(lm(data = final_matches_grouped_overall, log(well_capacity_lps) ~ log(cropland_area)))
+
+final_matches_grouped_overall
 
 summary(lm(data = final_matches_grouped_by_subbasin, log(depth_z_score) ~ log(cropland_area_z_score)))
 summary(lm(data = final_matches_grouped_by_subbasin, log(yield_z_score) ~ log(cropland_area_z_score)))
 
+
+# Your models
+model1 <- lm(data = final_matches_grouped_overall, log(normalised_depth) ~ log(cropland_area))  
+model2 <- lm(data = final_matches_grouped_overall, log(well_capacity_lps) ~ log(cropland_area))
+
+
+# Create a flextable
+table <- msummary(
+  list("Well Depth" = model1, "Well Capacity" = model2),
+  stars = TRUE,
+  output = "flextable")
+
+save_as_docx(table, path = "temp_table.docx")
 ```
 
 
@@ -343,7 +381,7 @@ final_matches_grouped_overall%>%
   ggplot(aes(cropland_area_percentile, mean))+
   geom_point(colour = "skyblue4")+
   theme_bw(14)+
-  labs(x = "Percentile of Cropland Area Owned", y = "Mean Total Well Depth Owned (m)")
+  labs(x = "Percentile of Cropland Area Owned", y = "Mean Total Normalised \n Well Depth Owned (m)")
 
 final_matches_grouped_overall%>%
   group_by(cropland_area_percentile)%>%
@@ -393,7 +431,7 @@ final_matches_grouped_overall%>%
   ggplot(aes(land_val_percentile, mean))+
   geom_point(colour = "skyblue4")+
   theme_bw(14)+
-  labs(x = "Percentile of Cropland Value Owned", y = "Mean Total Well Depth Owned (m)")
+  labs(x = "Percentile of Cropland Value Owned", y = "Mean Total Normalised \n Well Depth Owned (m)")
 
 
 
@@ -558,7 +596,7 @@ final_matches_grouped_overall%>%
   ggplot(aes(cropland_area_percentile, mean))+
   geom_point()+
   theme_bw(14)+
-  labs(x = "Percentile of Cropland Area Owned", y = "Mean Depth per Well (m)")
+  labs(x = "Percentile of Cropland Area Owned", y = "Mean Normalised Depth per Well (m)")
 
 
 final_matches_grouped_overall%>%
@@ -587,11 +625,11 @@ final_matches_grouped_overall = final_matches_grouped_overall%>%
 
 final_matches_grouped_overall%>%
   group_by(cropland_area_percentile)%>%
-  summarise(mean_depth = mean(depth_per_ha, na.rm = T))%>%
+  summarise(mean_depth = mean(depth_per_ha_norm, na.rm = T))%>%
   ggplot(aes(cropland_area_percentile, mean_depth))+
     geom_point(colour = "royalblue4")+
     theme_bw(14)+
-    labs(x = "Percentile of Cropland Area Owned", y = "Mean Well Depth per Hectare \n (m per ha)")
+    labs(x = "Percentile of Cropland Area Owned", y = "Mean Normalised Well Depth \n per Hectare (m per ha)")
     #scale_y_log10()
 
 final_matches_grouped_overall%>%
@@ -760,7 +798,7 @@ tm_shape(gw_basins_matches) +
 
 
 tm_shape(gw_basins_matches) +
-  tm_polygons(col = "gini_depth_norm", border.alpha = 0.5, palette = "RdPu", title = "Gini Coefficient \n     of Total\n   Well Depth\n     Owned")+
+  tm_polygons(col = "gini_depth_norm", border.alpha = 0.5, palette = "RdPu", title = "   Gini Coefficient \nof Total Normalised \n  Well Depth Owned")+
   tm_layout(legend.width = 0.5, frame = F, legend.text.size = 0.8, legend.title.size = 1.1)+
   tm_compass(type = "rose", position = c("left"), size = 2)+
   tm_scale_bar(position = "left")
@@ -827,7 +865,7 @@ ggplot(gw_basins_matches, aes(overdrafted_label, gini_well_depth))+
 ggplot(gw_basins_matches, aes(overdrafted_label, gini_depth_norm))+
   geom_boxplot(fill = "skyblue")+
   theme_bw(15)+
-  labs(x = "Subbasin Critically Overdrafted Status", y = "Gini Coefficient of Well Depth")
+  labs(x = "Subbasin Critically Overdrafted Status", y = "Gini Coefficient of \n Normalised Well Depth")
 ```
 
 Statistically tests (non-parametric wilcox test since not normally distributed) to test if these differences are statistically significant
@@ -1019,7 +1057,7 @@ fig7 = area_ginis%>%dplyr::select(-n)%>%
   ggplot(aes(variable, factor(crop_group, levels = rev(sort(unique(crop_group)))), fill = gini))+
   geom_tile()+
   scale_fill_gradient(low = "#f3bb57", high = "firebrick") +
-  scale_x_discrete(position = "top", labels = c("gini_area" = "Cultivated Area", "gini_capacity" = "Well Capacity", "gini_depth_norm" = "Well Depth"))+
+  scale_x_discrete(position = "top", labels = c("gini_area" = "Cultivated Area", "gini_capacity" = "Well Capacity", "gini_depth_norm" = "Normalised Well Depth"))+
   theme_bw(25)+
   geom_text(aes(label = sprintf("%.2f", gini)), color = "black", size = 8)+
   labs(x = "Variable", y = "Crop Group", fill = "Gini Coefficient")+
@@ -1114,7 +1152,7 @@ fig6a = final_matches_w_crop_precise%>%
   group_by(capacity_decile, crop_group, total_capacity)%>%
   reframe(crop_group_capacity = sum(crop_capacity, na.rm = T), crop_group_capacity_percent = crop_group_capacity/total_capacity)%>%
   unique()%>%
-  filter(!is.na(crop_group) & !crop_group %in% c("Legumes", "Oil Crops")& !is.na(capacity_decile))%>%
+  filter(!is.na(crop_group) & !crop_group %in% c("Legumes", "Oil Crops")& !is.na(capacity_decile))
   ggplot(aes(capacity_decile, crop_group_capacity_percent, colour = crop_group))+
   geom_point(size = 2)+
   geom_line(size = 0.75)+
@@ -1127,9 +1165,6 @@ fig6a
 
 #ggsave("Figures/6a.png", fig6a, width = 11, height = 7)
 
-#library(patchwork)
-#comb = (fig6a / fig6b) 
-#ggsave("Figures/fig6_patchwork.png", width = 11, height = 14, dpi = 600)
 
 final_matches_w_crop_precise%>%
   data.frame()%>%
