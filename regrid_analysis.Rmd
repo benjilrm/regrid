@@ -209,7 +209,6 @@ top_percentages_land
 boot.ci( boot(cropland_parcels_grouped_overall$cropland_area, boot_gini, R = 1000), type = "perc")
 boot.ci( boot(cropland_parcels_grouped_overall$landval, boot_gini, R = 1000), type = "perc")
 boot.ci( boot(cropland_parcels_grouped_overall$improvval, boot_gini, R = 1000), type = "perc")
-
 ```
 
 

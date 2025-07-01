@@ -217,9 +217,10 @@ filtered_wells = st_transform(st_as_sf(left_join(usgwd, oswcr, by = "ca_well_id"
   filter(!is.na(MTRS))%>%
   mutate(APN = gsub("[- ]", "", APN),
          well_address = str_to_lower(well_address),
-         address_st = str_to_lower(address_st))
+         address_st = str_to_lower(address_st))%>%
+  filter(Year.Well.was.Constructed > 1982)
 
-rm(oswcr, wells)
+rm(oswcr, usgwd)
 
 st_write(filtered_wells, "Data/Wells/Processed/filtered_wells_with_section.gpkg", delete_dsn = T)
 filtered_wells = st_read("Data/Wells/Processed/filtered_wells_with_section.gpkg")
@@ -431,7 +432,7 @@ for (i in 1:nrow(filtered_wells)) {
         loop_matches$string_dist[i] <- distances[min_dist]
         next}}}}
 
-write.csv(loop_matches, "Data/Well-parcel matches/full_loop_matches.csv", row.names = F)
+#write.csv(loop_matches, "Data/Well-parcel matches/full_loop_matches.csv", row.names = F)
 #loop_matches = read.csv("Data/Well-parcel matches/full_loop_matches.csv")
 
 table(loop_matches$match_method)
@@ -479,8 +480,6 @@ geocoded_wells_joined = geocoded_wells%>%
   filter(!is.na(my_parcel_num))%>%
   rename(my_parcel_num_geocoded = 2)%>%
   data.frame()%>%dplyr::select(-geometry)
-
-geocoded_wells_joined
 ```
 
 
@@ -585,27 +584,50 @@ filtered_parcels_filtered_owners <- filtered_parcels_filtered_owners %>%
     cleaned_owner = gsub("[-()&]", "", cleaned_owner),
     cleaned_owner = gsub("[[:space:][:punct:]]", "", cleaned_owner))
 
-unique_owners <- unique(filtered_parcels_filtered_owners$cleaned_owner) # Get unique cleaned owner names
-dist_matrix <- stringdist::stringdistmatrix(unique_owners, unique_owners, method = "jw") # Compute pairwise Jaro-Winkler distances 
-hc <- fastcluster::hclust(as.dist(dist_matrix), method = "average") # Apply hierarchical clustering
-threshold <- 0.1 # Define a similarity threshold (lower values mean stricter matching)
-clusters <- cutree(hc, h = threshold) # Cut tree into clusters based on threshold
+# Split by subbasin and process each group separately
+processed_owners <- filtered_parcels_filtered_owners %>%
+  group_by(subbasin_name) %>%
+  group_modify(~ {
+    # Get unique cleaned owner names within this subbasin
+    unique_owners <- unique(.x$cleaned_owner)
+    
+    # Skip processing if only one unique owner in this subbasin
+    if (length(unique_owners) <= 1) {
+      return(.x %>% mutate(final_owner = cleaned_owner))}
+    
+    # Compute pairwise Jaro-Winkler distances within this subbasin
+    dist_matrix <- stringdist::stringdistmatrix(unique_owners, unique_owners, method = "jw")
+    
+    # Apply hierarchical clustering within this subbasin
+    hc <- fastcluster::hclust(as.dist(dist_matrix), method = "average")
+    
+    # Define similarity threshold
+    threshold <- 0.1
+    clusters <- cutree(hc, h = threshold)
+    
+    # Create name mapping for this subbasin
+    name_mapping <- data.frame(
+      cleaned_owner = unique_owners, 
+      cluster = clusters, 
+      stringsAsFactors = FALSE
+    ) %>%
+      group_by(cluster) %>%
+      mutate(standardized = first(cleaned_owner)) %>%
+      ungroup() %>%
+      dplyr::select(-cluster)
+    
+    # Merge back into this subbasin's data
+    .x %>%
+      left_join(name_mapping, by = "cleaned_owner") %>%
+      mutate(final_owner = ifelse(is.na(standardized), cleaned_owner, standardized)) %>%
+      dplyr::select(-standardized)}) %>%
+  ungroup()
 
-# Assign a representative name for each cluster (first name in each group)
-name_mapping <- data.frame(cleaned_owner = unique_owners, cluster = clusters, stringsAsFactors = FALSE) %>%
-  group_by(cluster) %>%
-  mutate(standardized = first(cleaned_owner)) %>%  # Assign first name in cluster as standard
-  ungroup() %>%
-  dplyr::select(-cluster)
+# Replace the original dataframe with the processed one
+filtered_parcels_filtered_owners <- processed_owners
 
-# Merge back into dataset
-filtered_parcels_filtered_owners <- filtered_parcels_filtered_owners %>%
-  left_join(name_mapping, by = "cleaned_owner") %>%
-  mutate(final_owner = standardized) %>%
-  dplyr::select(-standardized)
-
-st_write(filtered_parcels_filtered_owners%>%filter(parcel_area_ha > area_threshold & fraction_cropland > cropland_threshold), "Data/Parcels/Filtered parcels/filtered_parcels_filtered_owners.gpkg", delete_dsn = T)
-filtered_parcels_filtered_owners = st_read("Data/Parcels/Filtered parcels/filtered_parcels_filtered_owners.gpkg")
+st_write(st_as_sf(filtered_parcels_filtered_owners%>%filter(parcel_area_ha > area_threshold & fraction_cropland > cropland_threshold), sf_column_name = "geom"), "Data/Parcels/Filtered parcels/filtered_parcels_filtered_owners_updated.gpkg", delete_dsn = T)
+filtered_parcels_filtered_owners = st_read("Data/Parcels/Filtered parcels/filtered_parcels_filtered_owners_updated.gpkg")
 ```
 
 We also apply this cleaning to the cropland parcels dataset
@@ -617,6 +639,48 @@ cropland_parcels_filtered_owners <- cropland_parcels_filtered_owners %>%
     cleaned_owner = gsub("[[:space:][:punct:]]", "", cleaned_owner),
     cropland_parcel_num = row_number())%>%
   filter(cleaned_owner != "")
+
+# Split by subbasin and process each group separately
+processed_owners <- cropland_parcels_filtered_owners %>%
+  group_by(subbasin_name) %>%
+  group_modify(~ {
+    # Get unique cleaned owner names within this subbasin
+    unique_owners <- unique(.x$cleaned_owner)
+    
+    # Skip processing if only one unique owner in this subbasin
+    if (length(unique_owners) <= 1) {
+      return(.x %>% mutate(final_owner = cleaned_owner))}
+    
+    # Compute pairwise Jaro-Winkler distances within this subbasin
+    dist_matrix <- stringdist::stringdistmatrix(unique_owners, unique_owners, method = "jw")
+    
+    # Apply hierarchical clustering within this subbasin
+    hc <- fastcluster::hclust(as.dist(dist_matrix), method = "average")
+    
+    # Define similarity threshold
+    threshold <- 0.1
+    clusters <- cutree(hc, h = threshold)
+    
+    # Create name mapping for this subbasin
+    name_mapping <- data.frame(
+      cleaned_owner = unique_owners, 
+      cluster = clusters, 
+      stringsAsFactors = FALSE
+    ) %>%
+      group_by(cluster) %>%
+      mutate(standardized = first(cleaned_owner)) %>%
+      ungroup() %>%
+      dplyr::select(-cluster)
+    
+    # Merge back into this subbasin's data
+    .x %>%
+      left_join(name_mapping, by = "cleaned_owner") %>%
+      mutate(final_owner = ifelse(is.na(standardized), cleaned_owner, standardized)) %>%
+      dplyr::select(-standardized)}) %>%
+  ungroup()
+
+# Replace the original dataframe with the processed one
+cropland_parcels_filtered_owners <- processed_owners
 
 st_write(cropland_parcels_filtered_owners, "Data/Parcels/Cropland parcels/cropland_parcels_filtered_owners.gpkg", delete_dsn = T)
 cropland_parcels_filtered_owners = st_read("Data/Parcels/Cropland parcels/cropland_parcels_filtered_owners.gpkg")
